@@ -10,7 +10,11 @@
 #ifndef KLEE_KLEEIRMETADATA_H
 #define KLEE_KLEEIRMETADATA_H
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/IR/MDBuilder.h"
+DISABLE_WARNING_POP
 
 namespace klee {
 
@@ -29,13 +33,13 @@ public:
   }
 
   void addAnnotation(llvm::Instruction &inst, llvm::StringRef key,
-                           llvm::StringRef value) {
+                     llvm::StringRef value) {
     inst.setMetadata(key, createStringNode(value));
   }
 
   /// \brief Check if the instruction has the key/value meta data
   static bool hasAnnotation(const llvm::Instruction &inst, llvm::StringRef key,
-                             llvm::StringRef value) {
+                            llvm::StringRef value) {
     auto v = inst.getMetadata(key);
     if (!v)
       return false;
@@ -46,6 +50,6 @@ public:
     return sv->getString().equals(value);
   }
 };
-}
+} // namespace klee
 
 #endif /* KLEE_KLEEIRMETADATA_H */

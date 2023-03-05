@@ -14,8 +14,12 @@
 #include "klee/Support/ErrorHandling.h"
 #include "klee/klee.h"
 
-#include <llvm/ADT/APInt.h>
-#include <llvm/Support/raw_ostream.h>
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
+#include "llvm/ADT/APInt.h"
+#include "llvm/Support/raw_ostream.h"
+DISABLE_WARNING_POP
 
 #include <cassert>
 #include <cstdint>
@@ -55,8 +59,9 @@ bool AssignmentGenerator::helperGenerateAssignment(const ref<Expr> &e,
     } else {
       return false;
     }
-    if (!ExtractExpr::create(kid_val, kid_val.get()->getWidth() - 1,
-                             1).get()->isZero()) {
+    if (!ExtractExpr::create(kid_val, kid_val.get()->getWidth() - 1, 1)
+             .get()
+             ->isZero()) {
       // FIXME: really bad hack to support those cases in which KLEE creates
       // Add expressions with negative values
       val = createAddExpr(kid_val, val);
@@ -193,13 +198,22 @@ bool AssignmentGenerator::helperGenerateAssignment(const ref<Expr> &e,
     if (isa<ConstantExpr>(re.index)) {
       if (re.updates.root->isSymbolicArray()) {
         ConstantExpr &index = static_cast<ConstantExpr &>(*re.index.get());
-        std::vector<unsigned char> c_value =
-            getIndexedValue(getByteValue(val), index, re.updates.root->size);
+        ref<ConstantExpr> arrayConstantSize =
+            dyn_cast<ConstantExpr>(re.updates.root->size);
+        if (!arrayConstantSize) {
+          klee_warning(
+              "Optimization for array of symbolic size is not supported");
+          return false;
+        }
+
+        std::vector<unsigned char> c_value = getIndexedValue(
+            getByteValue(val), index, arrayConstantSize->getZExtValue());
         if (c_value.size() == 0) {
           return false;
         }
         if (a->bindings.find(re.updates.root) == a->bindings.end()) {
-          a->bindings.insert(std::make_pair(re.updates.root, c_value));
+          a->bindings.insert(std::make_pair(
+              re.updates.root, SparseStorage<unsigned char>(c_value, 0)));
         } else {
           return false;
         }

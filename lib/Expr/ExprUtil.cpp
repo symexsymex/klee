@@ -16,14 +16,13 @@
 
 using namespace klee;
 
-void klee::findReads(ref<Expr> e, 
-                     bool visitUpdates,
-                     std::vector< ref<ReadExpr> > &results) {
-  // Invariant: \forall_{i \in stack} !i.isConstant() && i \in visited 
-  std::vector< ref<Expr> > stack;
+void klee::findReads(ref<Expr> e, bool visitUpdates,
+                     std::vector<ref<ReadExpr>> &results) {
+  // Invariant: \forall_{i \in stack} !i.isConstant() && i \in visited
+  std::vector<ref<Expr>> stack;
   ExprHashSet visited;
   std::set<const UpdateNode *> updates;
-  
+
   if (!isa<ConstantExpr>(e)) {
     visited.insert(e);
     stack.push_back(e);
@@ -38,10 +37,23 @@ void klee::findReads(ref<Expr> e,
       // repeats.
       results.push_back(re);
 
-      if (!isa<ConstantExpr>(re->index) &&
-          visited.insert(re->index).second)
+      if (!isa<ConstantExpr>(re->index) && visited.insert(re->index).second)
         stack.push_back(re->index);
-      
+
+      if (!isa<ConstantExpr>(re->updates.root->getSize()) &&
+          visited.insert(re->updates.root->getSize()).second) {
+        stack.push_back(re->updates.root->getSize());
+      }
+
+      if (isa<LazyInitializationSource>(re->updates.root->source) &&
+          visited
+              .insert(cast<LazyInitializationSource>(re->updates.root->source)
+                          ->pointer)
+              .second) {
+        stack.push_back(
+            cast<LazyInitializationSource>(re->updates.root->source)->pointer);
+      }
+
       if (visitUpdates) {
         // XXX this is probably suboptimal. We want to avoid a potential
         // explosion traversing update lists which can be quite
@@ -63,10 +75,9 @@ void klee::findReads(ref<Expr> e,
       }
     } else if (!isa<ConstantExpr>(top)) {
       Expr *e = top.get();
-      for (unsigned i=0; i<e->getNumKids(); i++) {
+      for (unsigned i = 0; i < e->getNumKids(); i++) {
         ref<Expr> k = e->getKid(i);
-        if (!isa<ConstantExpr>(k) &&
-            visited.insert(k).second)
+        if (!isa<ConstantExpr>(k) && visited.insert(k).second)
           stack.push_back(k);
       }
     }
@@ -77,18 +88,21 @@ void klee::findReads(ref<Expr> e,
 
 namespace klee {
 
-class SymbolicObjectFinder : public ExprVisitor {
+class ObjectFinder : public ExprVisitor {
 protected:
+  bool findOnlySymbolicObjects;
+
   Action visitRead(const ReadExpr &re) {
     const UpdateList &ul = re.updates;
 
+    visit(ul.root->getSize());
     // XXX should we memo better than what ExprVisitor is doing for us?
     for (const auto *un = ul.head.get(); un; un = un->next.get()) {
       visit(un->index);
       visit(un->value);
     }
 
-    if (ul.root->isSymbolicArray())
+    if (!findOnlySymbolicObjects || ul.root->isSymbolicArray())
       if (results.insert(ul.root).second)
         objects.push_back(ul.root);
 
@@ -96,16 +110,24 @@ protected:
   }
 
 public:
-  std::set<const Array*> results;
-  std::vector<const Array*> &objects;
-  
-  SymbolicObjectFinder(std::vector<const Array*> &_objects)
-    : objects(_objects) {}
+  std::set<const Array *> results;
+  std::vector<const Array *> &objects;
+
+  ObjectFinder(std::vector<const Array *> &_objects,
+               bool _findOnlySymbolicObjects = false)
+      : findOnlySymbolicObjects(_findOnlySymbolicObjects), objects(_objects) {}
+};
+
+class SymbolicObjectFinder : public ObjectFinder {
+public:
+  SymbolicObjectFinder(std::vector<const Array *> &_objects)
+      : ObjectFinder(_objects, true) {}
 };
 
 ExprVisitor::Action ConstantArrayFinder::visitRead(const ReadExpr &re) {
   const UpdateList &ul = re.updates;
 
+  visit(ul.root->getSize());
   // FIXME should we memo better than what ExprVisitor is doing for us?
   for (const auto *un = ul.head.get(); un; un = un->next.get()) {
     visit(un->index);
@@ -118,24 +140,84 @@ ExprVisitor::Action ConstantArrayFinder::visitRead(const ReadExpr &re) {
 
   return Action::doChildren();
 }
-}
+} // namespace klee
 
-template<typename InputIterator>
-void klee::findSymbolicObjects(InputIterator begin, 
-                               InputIterator end,
-                               std::vector<const Array*> &results) {
+template <typename InputIterator>
+void klee::findSymbolicObjects(InputIterator begin, InputIterator end,
+                               std::vector<const Array *> &results) {
   SymbolicObjectFinder of(results);
-  for (; begin!=end; ++begin)
+  for (; begin != end; ++begin)
     of.visit(*begin);
 }
 
 void klee::findSymbolicObjects(ref<Expr> e,
-                               std::vector<const Array*> &results) {
-  findSymbolicObjects(&e, &e+1, results);
+                               std::vector<const Array *> &results) {
+  findSymbolicObjects(&e, &e + 1, results);
 }
 
-typedef std::vector< ref<Expr> >::iterator A;
-template void klee::findSymbolicObjects<A>(A, A, std::vector<const Array*> &);
+template <typename InputIterator>
+void klee::findObjects(InputIterator begin, InputIterator end,
+                       std::vector<const Array *> &results) {
+  ObjectFinder of(results);
+  for (; begin != end; ++begin)
+    of.visit(*begin);
+}
 
-typedef std::set< ref<Expr> >::iterator B;
-template void klee::findSymbolicObjects<B>(B, B, std::vector<const Array*> &);
+void klee::findObjects(ref<Expr> e, std::vector<const Array *> &results) {
+  findObjects(&e, &e + 1, results);
+}
+
+typedef std::vector<ref<Expr>>::iterator A;
+template void klee::findSymbolicObjects<A>(A, A, std::vector<const Array *> &);
+
+typedef std::set<ref<Expr>>::iterator B;
+template void klee::findSymbolicObjects<B>(B, B, std::vector<const Array *> &);
+
+typedef ExprHashSet::iterator C;
+template void klee::findSymbolicObjects<C>(C, C, std::vector<const Array *> &);
+
+typedef std::vector<ref<Expr>>::iterator A;
+template void klee::findObjects<A>(A, A, std::vector<const Array *> &);
+
+typedef std::vector<ref<Expr>>::const_iterator cA;
+template void klee::findObjects<cA>(cA, cA, std::vector<const Array *> &);
+
+typedef std::set<ref<Expr>>::iterator B;
+template void klee::findObjects<B>(B, B, std::vector<const Array *> &);
+
+typedef ExprHashSet::iterator C;
+template void klee::findObjects<C>(C, C, std::vector<const Array *> &);
+
+bool klee::isReadFromSymbolicArray(ref<Expr> e) {
+  if (auto read = dyn_cast<ReadExpr>(e)) {
+    return !read->updates.root->isConstantArray();
+  }
+  if (auto concat = dyn_cast<ConcatExpr>(e)) {
+    for (size_t i = 0; i < concat->getNumKids(); i++) {
+      if (!isReadFromSymbolicArray(concat->getKid(i))) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+ref<Expr>
+klee::createNonOverflowingSumExpr(const std::vector<ref<Expr>> &terms) {
+  if (terms.empty()) {
+    return Expr::createFalse();
+  }
+
+  Expr::Width termWidth = terms.front()->getWidth();
+  uint64_t overflowBits = sizeof(unsigned long long) * CHAR_BIT - 1 -
+                          __builtin_clzll(terms.size() + 1);
+
+  ref<Expr> sum = ConstantExpr::create(0, termWidth + overflowBits);
+  for (const ref<Expr> &expr : terms) {
+    assert(termWidth == expr->getWidth());
+    sum =
+        AddExpr::create(sum, ZExtExpr::create(expr, termWidth + overflowBits));
+  }
+  return sum;
+}

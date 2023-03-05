@@ -13,9 +13,13 @@
 #include "klee/Support/ErrorHandling.h"
 #include "klee/Support/OptionCategories.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/IR/GlobalAlias.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Regex.h"
+DISABLE_WARNING_POP
 
 using namespace llvm;
 
@@ -135,10 +139,8 @@ bool FunctionAliasPass::runOnModule(Module &M) {
 
 const FunctionType *FunctionAliasPass::getFunctionType(const GlobalValue *gv) {
   const Type *type = gv->getType();
-  while (type->isPointerTy()) {
-    const PointerType *ptr = cast<PointerType>(type);
-    type = ptr->getElementType();
-  }
+  while (type->isPointerTy())
+    type = type->getPointerElementType();
   return cast<FunctionType>(type);
 }
 

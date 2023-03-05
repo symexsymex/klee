@@ -10,6 +10,9 @@
 #include "klee/Module/InstructionInfoTable.h"
 #include "klee/Config/Version.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/AssemblyAnnotationWriter.h"
 #include "llvm/IR/DebugInfo.h"
@@ -25,6 +28,7 @@
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
+DISABLE_WARNING_POP
 
 #include <cstdint>
 #include <map>
@@ -33,66 +37,54 @@
 using namespace klee;
 
 class InstructionToLineAnnotator : public llvm::AssemblyAnnotationWriter {
+private:
+  std::unordered_map<uintptr_t, uint64_t> mapping = {};
+
 public:
   void emitInstructionAnnot(const llvm::Instruction *i,
-                            llvm::formatted_raw_ostream &os) {
-    os << "%%%";
-    os << reinterpret_cast<std::uintptr_t>(i);
+                            llvm::formatted_raw_ostream &os) override {
+    os.flush();
+    mapping.emplace(reinterpret_cast<std::uintptr_t>(i), os.getLine() + 1);
   }
 
   void emitFunctionAnnot(const llvm::Function *f,
-                         llvm::formatted_raw_ostream &os) {
-    os << "%%%";
-    os << reinterpret_cast<std::uintptr_t>(f);
+                         llvm::formatted_raw_ostream &os) override {
+    os.flush();
+    mapping.emplace(reinterpret_cast<std::uintptr_t>(f), os.getLine() + 1);
   }
+
+  std::unordered_map<uintptr_t, uint64_t> getMapping() const { return mapping; }
 };
 
-static std::map<uintptr_t, uint64_t>
-buildInstructionToLineMap(const llvm::Module &m) {
+static std::unordered_map<uintptr_t, uint64_t>
+buildInstructionToLineMap(const llvm::Module &m,
+                          std::unique_ptr<llvm::raw_fd_ostream> assemblyFS) {
 
-  std::map<uintptr_t, uint64_t> mapping;
   InstructionToLineAnnotator a;
-  std::string str;
 
-  llvm::raw_string_ostream os(str);
-  m.print(os, &a);
-  os.flush();
+  m.print(*assemblyFS, &a);
+  assemblyFS->flush();
 
-  const char *s;
-
-  unsigned line = 1;
-  for (s=str.c_str(); *s; s++) {
-    if (*s != '\n')
-      continue;
-
-    line++;
-    if (s[1] != '%' || s[2] != '%' || s[3] != '%')
-      continue;
-
-    s += 4;
-    char *end;
-    uint64_t value = strtoull(s, &end, 10);
-    if (end != s) {
-      mapping.insert(std::make_pair(value, line));
-    }
-    s = end;
-  }
-
-  return mapping;
+  return a.getMapping();
 }
 
 class DebugInfoExtractor {
   std::vector<std::unique_ptr<std::string>> &internedStrings;
-  std::map<uintptr_t, uint64_t> lineTable;
+  std::unordered_map<uintptr_t, uint64_t> lineTable;
 
   const llvm::Module &module;
+  bool withAsm = false;
 
 public:
   DebugInfoExtractor(
       std::vector<std::unique_ptr<std::string>> &_internedStrings,
-      const llvm::Module &_module)
+      const llvm::Module &_module,
+      std::unique_ptr<llvm::raw_fd_ostream> assemblyFS)
       : internedStrings(_internedStrings), module(_module) {
-    lineTable = buildInstructionToLineMap(module);
+    if (assemblyFS) {
+      withAsm = true;
+      lineTable = buildInstructionToLineMap(module, std::move(assemblyFS));
+    }
   }
 
   std::string &getInternedString(const std::string &s) {
@@ -111,7 +103,10 @@ public:
   }
 
   std::unique_ptr<FunctionInfo> getFunctionInfo(const llvm::Function &Func) {
-    auto asmLine = lineTable.at(reinterpret_cast<std::uintptr_t>(&Func));
+    llvm::Optional<uint64_t> asmLine;
+    if (withAsm) {
+      asmLine = lineTable.at(reinterpret_cast<std::uintptr_t>(&Func));
+    }
     auto dsub = Func.getSubprogram();
 
     if (dsub != nullptr) {
@@ -127,7 +122,10 @@ public:
 
   std::unique_ptr<InstructionInfo>
   getInstructionInfo(const llvm::Instruction &Inst, const FunctionInfo *f) {
-    auto asmLine = lineTable.at(reinterpret_cast<std::uintptr_t>(&Inst));
+    llvm::Optional<uint64_t> asmLine;
+    if (withAsm) {
+      asmLine = lineTable.at(reinterpret_cast<std::uintptr_t>(&Inst));
+    }
 
     // Retrieve debug information associated with instruction
     auto dl = Inst.getDebugLoc();
@@ -161,18 +159,28 @@ public:
   }
 };
 
-InstructionInfoTable::InstructionInfoTable(const llvm::Module &m) {
+InstructionInfoTable::InstructionInfoTable(
+    const llvm::Module &m, std::unique_ptr<llvm::raw_fd_ostream> assemblyFS,
+    bool withInstructions) {
   // Generate all debug instruction information
-  DebugInfoExtractor DI(internedStrings, m);
+  DebugInfoExtractor DI(internedStrings, m, std::move(assemblyFS));
+
   for (const auto &Func : m) {
     auto F = DI.getFunctionInfo(Func);
     auto FR = F.get();
-    functionInfos.insert(std::make_pair(&Func, std::move(F)));
+    functionInfos.emplace(&Func, std::move(F));
 
     for (auto it = llvm::inst_begin(Func), ie = llvm::inst_end(Func); it != ie;
          ++it) {
       auto instr = &*it;
-      infos.insert(std::make_pair(instr, DI.getInstructionInfo(*instr, FR)));
+      auto instInfo = DI.getInstructionInfo(*instr, FR);
+      if (withInstructions) {
+        insts[instInfo->file][instInfo->line][instInfo->column].insert(
+            instr->getOpcode());
+      }
+      filesNames.insert(instInfo->file);
+      fileNameToFunctions[instInfo->file].insert(&Func);
+      infos.emplace(instr, std::move(instInfo));
     }
   }
 
@@ -205,4 +213,18 @@ InstructionInfoTable::getFunctionInfo(const llvm::Function &f) const {
                              "initial module!");
 
   return *found->second.get();
+}
+
+const InstructionInfoTable::LocationToFunctionsMap &
+InstructionInfoTable::getFileNameToFunctions() const {
+  return fileNameToFunctions;
+}
+
+const std::unordered_set<std::string> &
+InstructionInfoTable::getFilesNames() const {
+  return filesNames;
+}
+
+InstructionInfoTable::Instructions InstructionInfoTable::getInstructions() {
+  return std::move(insts);
 }

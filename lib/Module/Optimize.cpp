@@ -1,7 +1,6 @@
 // FIXME: This file is a bastard child of opt.cpp and llvm-ld's
 // Optimize.cpp. This stuff should live in common code.
 
-
 //===- Optimize.cpp - Optimize a complete program -------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
@@ -18,16 +17,15 @@
 #include "klee/Config/Version.h"
 #include "klee/Support/OptionCategories.h"
 
-#ifdef USE_WORKAROUND_LLVM_PR39177
-#include "Passes.h"
-#endif
-
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/Analysis/GlobalsModRef.h"
-#include "llvm/Analysis/Passes.h"
 #include "llvm/Analysis/LoopPass.h"
-#include "llvm/IR/Module.h"
+#include "llvm/Analysis/Passes.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/DynamicLibrary.h"
@@ -35,13 +33,11 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/FunctionAttrs.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVN.h"
-
-#if LLVM_VERSION_CODE >= LLVM_VERSION(7, 0)
 #include "llvm/Transforms/Utils.h"
-#include "llvm/Transforms/InstCombine/InstCombine.h"
-#endif
+DISABLE_WARNING_POP
 
 using namespace llvm;
 
@@ -55,11 +51,10 @@ static cl::opt<bool> DisableInternalize(
     cl::desc("Do not mark all symbols as internal (default=false)"),
     cl::init(false), cl::cat(klee::ModuleCat));
 
-static cl::opt<bool> VerifyEach(
-    "verify-each",
-    cl::desc("Verify intermediate results of all optimization passes (default=false)"),
-    cl::init(false),
-    cl::cat(klee::ModuleCat));
+static cl::opt<bool> VerifyEach("verify-each",
+                                cl::desc("Verify intermediate results of all "
+                                         "optimization passes (default=false)"),
+                                cl::init(false), cl::cat(klee::ModuleCat));
 
 static cl::alias ExportDynamic("export-dynamic",
                                cl::aliasopt(DisableInternalize),
@@ -93,34 +88,34 @@ static inline void addPass(legacy::PassManager &PM, Pass *P) {
 
 namespace llvm {
 
-
 static void AddStandardCompilePasses(legacy::PassManager &PM) {
-  PM.add(createVerifierPass());                  // Verify that input is correct
+  PM.add(createVerifierPass()); // Verify that input is correct
 
   // If the -strip-debug command line option was specified, do it.
   if (StripDebug)
     addPass(PM, createStripSymbolsPass(true));
 
-  addPass(PM, createCFGSimplificationPass());    // Clean up disgusting code
-  addPass(PM, createPromoteMemoryToRegisterPass());// Kill useless allocas
-  addPass(PM, createGlobalOptimizerPass());      // Optimize out global vars
-  addPass(PM, createGlobalDCEPass());            // Remove unused fns and globs
+  addPass(PM, createCFGSimplificationPass());       // Clean up disgusting code
+  addPass(PM, createPromoteMemoryToRegisterPass()); // Kill useless allocas
+  addPass(PM, createGlobalOptimizerPass());         // Optimize out global vars
+  addPass(PM, createGlobalDCEPass()); // Remove unused fns and globs
 #if LLVM_VERSION_CODE >= LLVM_VERSION(11, 0)
-  addPass(PM, createSCCPPass());                 // Constant prop with SCCP
+  addPass(PM, createSCCPPass()); // Constant prop with SCCP
 #else
-  addPass(PM, createIPConstantPropagationPass());// IP Constant Propagation
+  addPass(PM, createIPConstantPropagationPass()); // IP Constant Propagation
 #endif
   addPass(PM, createDeadArgEliminationPass());   // Dead argument elimination
   addPass(PM, createInstructionCombiningPass()); // Clean up after IPCP & DAE
   addPass(PM, createCFGSimplificationPass());    // Clean up after IPCP & DAE
 
-  addPass(PM, createPruneEHPass());              // Remove dead EH info
+  addPass(PM, createPruneEHPass()); // Remove dead EH info
   addPass(PM, createPostOrderFunctionAttrsLegacyPass());
-  addPass(PM, createReversePostOrderFunctionAttrsPass()); // Deduce function attrs
+  addPass(PM,
+          createReversePostOrderFunctionAttrsPass()); // Deduce function attrs
 
   if (!DisableInline)
-    addPass(PM, createFunctionInliningPass());   // Inline small functions
-  addPass(PM, createArgumentPromotionPass());    // Scalarize uninlined fn args
+    addPass(PM, createFunctionInliningPass()); // Inline small functions
+  addPass(PM, createArgumentPromotionPass());  // Scalarize uninlined fn args
 
   addPass(PM, createInstructionCombiningPass()); // Cleanup for scalarrepl.
   addPass(PM, createJumpThreadingPass());        // Thread jumps.
@@ -128,12 +123,12 @@ static void AddStandardCompilePasses(legacy::PassManager &PM) {
   addPass(PM, createSROAPass());                 // Break up aggregate allocas
   addPass(PM, createInstructionCombiningPass()); // Combine silly seq's
 
-  addPass(PM, createTailCallEliminationPass());  // Eliminate tail calls
-  addPass(PM, createCFGSimplificationPass());    // Merge & remove BBs
-  addPass(PM, createReassociatePass());          // Reassociate expressions
+  addPass(PM, createTailCallEliminationPass()); // Eliminate tail calls
+  addPass(PM, createCFGSimplificationPass());   // Merge & remove BBs
+  addPass(PM, createReassociatePass());         // Reassociate expressions
   addPass(PM, createLoopRotatePass());
-  addPass(PM, createLICMPass());                 // Hoist loop invariants
-  addPass(PM, createLoopUnswitchPass());         // Unswitch loops.
+  addPass(PM, createLICMPass());         // Hoist loop invariants
+  addPass(PM, createLoopUnswitchPass()); // Unswitch loops.
   // FIXME : Removing instcombine causes nestedloop regression.
   addPass(PM, createInstructionCombiningPass());
   addPass(PM, createIndVarSimplifyPass());       // Canonicalize indvars
@@ -166,10 +161,6 @@ void Optimize(Module *M, llvm::ArrayRef<const char *> preservedFunctions) {
   // If we're verifying, start off with a verification pass.
   if (VerifyEach)
     Passes.add(createVerifierPass());
-
-#ifdef USE_WORKAROUND_LLVM_PR39177
-  addPass(Passes, new klee::WorkaroundLLVMPR39177Pass());
-#endif
 
   // DWD - Run the opt standard pass list as well.
   AddStandardCompilePasses(Passes);
@@ -226,7 +217,7 @@ void Optimize(Module *M, llvm::ArrayRef<const char *> preservedFunctions) {
   // The IPO passes may leave cruft around.  Clean up after them.
   addPass(Passes, createInstructionCombiningPass());
   addPass(Passes, createJumpThreadingPass()); // Thread jumps.
-  addPass(Passes, createSROAPass()); // Break up allocas
+  addPass(Passes, createSROAPass());          // Break up allocas
 
   // Run a few AA driven optimizations here and now, to cleanup the code.
   addPass(Passes, createPostOrderFunctionAttrsLegacyPass());
@@ -265,4 +256,4 @@ void Optimize(Module *M, llvm::ArrayRef<const char *> preservedFunctions) {
   // Run our queue of passes all at once now, efficiently.
   Passes.run(*M);
 }
-}
+} // namespace llvm

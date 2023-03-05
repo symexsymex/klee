@@ -5,7 +5,7 @@
 // RUN: %klee --output-dir=%t.klee-out --only-output-states-covering-new %t1.bc
 
 // We expect 4 different output states, one for each named value and one "other"
-// one with the prefered CEX. We verify this by using ktest-tool to dump the
+// one with the preferred CEX. We verify this by using ktest-tool to dump the
 // values, and then checking the output.
 //
 // RUN: %ktest-tool %t.klee-out/*.ktest | FileCheck %s
@@ -25,7 +25,7 @@ void f3(void) {}
 int main() {
   int x;
   klee_make_symbolic(&x, sizeof x, "x");
-  klee_assume((unsigned) x < 256);
+  klee_assume((unsigned)x < 256);
 
   if (x == 17) {
     f0();

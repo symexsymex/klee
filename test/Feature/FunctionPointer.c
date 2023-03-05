@@ -1,6 +1,6 @@
 // RUN: %clang %s -emit-llvm -g -c -o %t.bc
 // RUN: rm -rf %t.klee-out
-// RUN: %klee --output-dir=%t.klee-out --write-no-tests --exit-on-error %t.bc 2>&1 | FileCheck %s
+// RUN: %klee --search=bfs --use-guided-search=none --output-dir=%t.klee-out --write-no-tests --exit-on-error %t.bc 2>&1 | FileCheck %s
 
 #include "klee/klee.h"
 
@@ -32,7 +32,7 @@ int main(int argc, char **argv) {
   xx("called via xx");
 
   klee_make_symbolic(&fp, sizeof fp, "fp");
-  if(fp == baz) {
+  if (fp == baz) {
     // CHECK: baz: calling via simple symbolic!
     printf("fp = %p, baz = %p\n", fp, baz);
     fp("calling via simple symbolic!");
@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
 
   void (*fp2)(const char *);
   klee_make_symbolic(&fp2, sizeof fp2, "fp2");
-  if(fp2 == baz || fp2 == foo) {
+  if (fp2 == baz || fp2 == foo) {
     // CHECK-DAG: baz: calling via symbolic!
     // CHECK-DAG: foo: calling via symbolic!
     fp2("calling via symbolic!");

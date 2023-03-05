@@ -1,14 +1,17 @@
-/* This test checks that KLEE correctly handles variadic arguments with the 
+/* This test checks that KLEE correctly handles variadic arguments with the
    byval attribute */
 
 // RUN: %clang %s -emit-llvm %O0opt -c -g -o %t1.bc
 // RUN: rm -rf %t.klee-out
 // RUN: %klee --exit-on-error --output-dir=%t.klee-out %t1.bc
-// RUN FileCheck %s klee-last/assembly.ll
-// CHECK: @test(i32 -1, %struct.bar* byval
+// RUN: FileCheck %s --input-file=%t.klee-out/assembly.ll
+//
+// TODO: Make noundef unconditional when LLVM 14 is the oldest supported version.
+// CHECK: @test1({{.*}}, i32 {{(noundef )?}}-1, %struct.foo* {{(noundef )?}}byval{{.*}} %struct.bar* {{(noundef )?}}byval
+// CHECK: @test2({{.*}}, %struct.foo* {{(noundef )?}}byval{{.*}} %struct.bar* {{(noundef )?}}byval
 
-#include <stdarg.h>
 #include <assert.h>
+#include <stdarg.h>
 #include <stdio.h>
 
 struct foo {
@@ -42,14 +45,14 @@ struct foo test1(int x, ...) {
   assert(f.f5 == 5);
   assert(f.f6 == 6);
   assert(f.f7 == 7);
-  
+
   struct bar b = va_arg(ap, struct bar);
   assert(b.f1 == 11);
   assert(b.f2 == 12);
   assert(b.f3 == 13);
   assert(b.f4 == 14);
   assert(b.f5 == 15);
-  
+
   va_end(ap);
 
   f.f1++;
@@ -76,7 +79,7 @@ struct foo test2(int x, long long int l, ...) {
 
   l = va_arg(ap, long long int);
   assert(l == 1000);
-  
+
   struct bar b = va_arg(ap, struct bar);
   assert(b.f1 == 11);
   assert(b.f2 == 12);
@@ -99,7 +102,7 @@ struct foo test2(int x, long long int l, ...) {
   assert(b.f3 == 5);
   assert(b.f4 == 7);
   assert(b.f5 == 9);
-  
+
   va_end(ap);
 
   f.f1++;
@@ -107,8 +110,8 @@ struct foo test2(int x, long long int l, ...) {
 }
 
 int main() {
-  struct foo f = { 1, 2, 3, 4, 5, 6, 7 };
-  struct bar b = { 11, 12, 13, 14, 15 };
+  struct foo f = {1, 2, 3, 4, 5, 6, 7};
+  struct bar b = {11, 12, 13, 14, 15};
   struct foo res = test1(-1, f, b);
   assert(res.f1 == 2);
   assert(res.f2 == 2);
@@ -122,7 +125,7 @@ int main() {
 
   int i = 10;
   long long int l = 1000;
-  struct foo f2 = { 10, 20, 30, 40, 50, 60, 70 };
-  struct bar b2 = { 1, 3, 5, 7, 9 };
+  struct foo f2 = {10, 20, 30, 40, 50, 60, 70};
+  struct bar b2 = {1, 3, 5, 7, 9};
   test2(i, l, i, f, l, b, f2, b2);
 }

@@ -1,4 +1,4 @@
-//===-- STPSolver.h
+//===-- STPSolver.h -------------------------------------------------------===//
 //---------------------------------------------------===//
 //
 //                     The KLEE Symbolic Virtual Machine
@@ -34,6 +34,6 @@ public:
   /// is off.
   virtual void setCoreSolverTimeout(time::Span timeout);
 };
-}
+} // namespace klee
 
 #endif /* KLEE_STPSOLVER_H */

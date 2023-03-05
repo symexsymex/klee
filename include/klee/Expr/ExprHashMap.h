@@ -12,31 +12,40 @@
 
 #include "klee/Expr/Expr.h"
 
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace klee {
 
-  namespace util {
-    struct ExprHash  {
-      unsigned operator()(const ref<Expr> &e) const { return e->hash(); }
-    };
-    
-    struct ExprCmp {
-      bool operator()(const ref<Expr> &a, const ref<Expr> &b) const {
-        return a==b;
-      }
-    };
+namespace util {
+struct ExprHash {
+  unsigned operator()(const ref<Expr> &e) const { return e->hash(); }
+};
+
+struct ExprCmp {
+  bool operator()(const ref<Expr> &a, const ref<Expr> &b) const {
+    return a == b;
   }
+};
 
-  template <class T>
-  class ExprHashMap
-      : public std::unordered_map<ref<Expr>, T, klee::util::ExprHash,
-                                  klee::util::ExprCmp> {};
+struct ExprLess {
+  bool operator()(const ref<Expr> &a, const ref<Expr> &b) const {
+    return a < b;
+  }
+};
+} // namespace util
 
-  typedef std::unordered_set<ref<Expr>, klee::util::ExprHash,
-                             klee::util::ExprCmp>
-      ExprHashSet;
+template <class T>
+class ExprHashMap
+    : public std::unordered_map<ref<Expr>, T, klee::util::ExprHash,
+                                klee::util::ExprCmp> {};
+
+typedef std::unordered_set<ref<Expr>, klee::util::ExprHash, klee::util::ExprCmp>
+    ExprHashSet;
+
+typedef std::set<ref<Expr>, util::ExprLess> ExprOrderedSet;
+using constraints_ty = ExprOrderedSet;
 } // namespace klee
 
 #endif /* KLEE_EXPRHASHMAP_H */

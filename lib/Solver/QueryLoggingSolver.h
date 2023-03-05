@@ -15,7 +15,13 @@
 #include "klee/Solver/SolverImpl.h"
 #include "klee/System/Time.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/Support/raw_ostream.h"
+DISABLE_WARNING_POP
+
+#include <memory>
 
 using namespace klee;
 
@@ -26,14 +32,15 @@ using namespace klee;
 class QueryLoggingSolver : public SolverImpl {
 
 protected:
-  Solver *solver;
+  std::unique_ptr<Solver> solver;
   std::unique_ptr<llvm::raw_ostream> os;
   // @brief Buffer used by logBuffer
   std::string BufferString;
   // @brief buffer to store logs before flushing to file
   llvm::raw_string_ostream logBuffer;
   unsigned queryCount;
-  time::Span minQueryTimeToLog; // we log to file only those queries which take longer than the specified time
+  time::Span minQueryTimeToLog; // we log to file only those queries which take
+                                // longer than the specified time
   bool logTimedOutQueries = false;
   time::Point startTime;
   time::Span lastQueryDuration;
@@ -56,19 +63,21 @@ protected:
   void flushBufferConditionally(bool writeToFile);
 
 public:
-  QueryLoggingSolver(Solver *_solver, std::string path, const std::string &commentSign,
-                     time::Span queryTimeToLog, bool logTimedOut);
-
-  virtual ~QueryLoggingSolver();
+  QueryLoggingSolver(std::unique_ptr<Solver> solver, std::string path,
+                     const std::string &commentSign, time::Span queryTimeToLog,
+                     bool logTimedOut);
 
   /// implementation of the SolverImpl interface
   bool computeTruth(const Query &query, bool &isValid);
-  bool computeValidity(const Query &query, Solver::Validity &result);
+  bool computeValidity(const Query &query, PartialValidity &result);
   bool computeValue(const Query &query, ref<Expr> &result);
   bool computeInitialValues(const Query &query,
                             const std::vector<const Array *> &objects,
-                            std::vector<std::vector<unsigned char> > &values,
+                            std::vector<SparseStorage<unsigned char>> &values,
                             bool &hasSolution);
+  bool check(const Query &query, ref<SolverResponse> &result);
+  bool computeValidityCore(const Query &query, ValidityCore &validityCore,
+                           bool &isValid);
   SolverRunStatus getOperationStatusCode();
   char *getConstraintLog(const Query &);
   void setCoreSolverTimeout(time::Span timeout);

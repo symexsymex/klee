@@ -20,8 +20,12 @@
 #include "klee/Support/ErrorHandling.h"
 #include "klee/Support/OptionCategories.h"
 
-#include <llvm/ADT/APInt.h>
-#include <llvm/Support/CommandLine.h>
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
+#include "llvm/ADT/APInt.h"
+#include "llvm/Support/CommandLine.h"
+DISABLE_WARNING_POP
 
 #include <algorithm>
 #include <cassert>
@@ -143,7 +147,7 @@ ref<Expr> ExprOptimizer::optimizeExpr(const ref<Expr> &e, bool valueOnly) {
           result = ExprRewriter::createOptExpr(e, arrays, idx_valIdx);
         } else {
           klee_warning("OPT_I: infeasible branch!");
-          result = ConstantExpr::create(0, Expr::Bool);
+          result = Expr::createFalse();
         }
         // Add new expression to cache
         if (result) {
@@ -218,31 +222,35 @@ bool ExprOptimizer::computeIndexes(array2idx_ty &arrays, const ref<Expr> &e,
     }
 
     // For each concrete value 'i' stored in the array
-    for (size_t aIdx = 0; aIdx < arr->constantValues.size(); aIdx += width) {
-      auto *a = new Assignment();
-      std::vector<const Array *> objects;
-      std::vector<std::vector<unsigned char>> values;
+    if (ref<ConstantSource> constantSource =
+            cast<ConstantSource>(arr->source)) {
+      for (size_t aIdx = 0; aIdx < constantSource->constantValues.size();
+           aIdx += width) {
+        auto *a = new Assignment();
+        std::vector<const Array *> objects;
+        std::vector<std::vector<unsigned char>> values;
 
-      // For each symbolic index Expr(k) found
-      for (auto &index_it : element.second) {
-        ref<Expr> idx = index_it;
-        ref<Expr> val = ConstantExpr::alloc(aIdx, arr->getDomain());
-        // We create a partial assignment on 'k' s.t. Expr(k)==i
-        bool assignmentSuccess =
-            AssignmentGenerator::generatePartialAssignment(idx, val, a);
-        success |= assignmentSuccess;
+        // For each symbolic index Expr(k) found
+        for (auto &index_it : element.second) {
+          ref<Expr> idx = index_it;
+          ref<Expr> val = ConstantExpr::alloc(aIdx, arr->getDomain());
+          // We create a partial assignment on 'k' s.t. Expr(k)==i
+          bool assignmentSuccess =
+              AssignmentGenerator::generatePartialAssignment(idx, val, a);
+          success |= assignmentSuccess;
 
-        // If the assignment satisfies both the expression 'e' and the PC
-        ref<Expr> evaluation = a->evaluate(e);
-        if (assignmentSuccess && evaluation->isTrue()) {
-          if (idx_valIdx.find(idx) == idx_valIdx.end()) {
-            idx_valIdx.insert(std::make_pair(idx, std::vector<ref<Expr>>()));
+          // If the assignment satisfies both the expression 'e' and the PC
+          ref<Expr> evaluation = a->evaluate(e);
+          if (assignmentSuccess && evaluation->isTrue()) {
+            if (idx_valIdx.find(idx) == idx_valIdx.end()) {
+              idx_valIdx.insert(std::make_pair(idx, std::vector<ref<Expr>>()));
+            }
+            idx_valIdx[idx].emplace_back(
+                ConstantExpr::alloc(aIdx, arr->getDomain()));
           }
-          idx_valIdx[idx].emplace_back(
-              ConstantExpr::alloc(aIdx, arr->getDomain()));
         }
+        delete a;
       }
-      delete a;
     }
   }
   return success;
@@ -269,7 +277,12 @@ ref<Expr> ExprOptimizer::getSelectOptExpr(
       if (info.second > width) {
         width = info.second;
       }
-      unsigned size = read->updates.root->getSize();
+      ref<ConstantExpr> constantArraySize =
+          dyn_cast<ConstantExpr>(read->updates.root->getSize());
+      if (!constantArraySize) {
+        continue;
+      }
+      unsigned size = constantArraySize->getZExtValue();
       unsigned bytesPerElement = width / 8;
       unsigned elementsInArray = size / bytesPerElement;
 
@@ -286,7 +299,11 @@ ref<Expr> ExprOptimizer::getSelectOptExpr(
            un = un->next.get())
         us.push_back(un);
 
-      auto arrayConstValues = read->updates.root->constantValues;
+      std::vector<ref<ConstantExpr>> arrayConstValues;
+      if (ref<ConstantSource> constantSource =
+              dyn_cast<ConstantSource>(read->updates.root->source)) {
+        arrayConstValues = constantSource->constantValues;
+      }
       for (auto it = us.rbegin(); it != us.rend(); it++) {
         const UpdateNode *un = *it;
         auto ce = dyn_cast<ConstantExpr>(un->index);
@@ -302,11 +319,10 @@ ref<Expr> ExprOptimizer::getSelectOptExpr(
       for (unsigned i = 0; i < elementsInArray; i++) {
         uint64_t val = 0;
         for (unsigned j = 0; j < bytesPerElement; j++) {
-          val |= (*(
-                       arrayConstValues[(i * bytesPerElement) + j]
-                           .get()
-                           ->getAPValue()
-                           .getRawData())
+          val |= (*(arrayConstValues[(i * bytesPerElement) + j]
+                        .get()
+                        ->getAPValue()
+                        .getRawData())
                   << (j * 8));
         }
         arrayValues.push_back(val);
@@ -344,7 +360,12 @@ ref<Expr> ExprOptimizer::getSelectOptExpr(
       if (info.second > width) {
         width = info.second;
       }
-      unsigned size = read->updates.root->getSize();
+      ref<ConstantExpr> constantArraySize =
+          dyn_cast<ConstantExpr>(read->updates.root->getSize());
+      if (!constantArraySize) {
+        continue;
+      }
+      unsigned size = constantArraySize->getZExtValue();
       unsigned bytesPerElement = width / 8;
       unsigned elementsInArray = size / bytesPerElement;
       bool symbArray = read->updates.root->isSymbolicArray();
@@ -353,7 +374,11 @@ ref<Expr> ExprOptimizer::getSelectOptExpr(
       // Note: we already filtered the ReadExpr, so here we can safely
       // assume that the UpdateNodes contain ConstantExpr indexes, but in
       // this case we *cannot* assume anything on the values
-      auto arrayConstValues = read->updates.root->constantValues;
+      std::vector<ref<ConstantExpr>> arrayConstValues;
+      if (ref<ConstantSource> constantSource =
+              dyn_cast<ConstantSource>(read->updates.root->source)) {
+        arrayConstValues = constantSource->constantValues;
+      }
       if (arrayConstValues.size() < size) {
         // We need to "force" initialization of the values
         for (size_t i = arrayConstValues.size(); i < size; i++) {
@@ -365,7 +390,8 @@ ref<Expr> ExprOptimizer::getSelectOptExpr(
       // reverse the list
       std::vector<const UpdateNode *> us;
       us.reserve(read->updates.getSize());
-      for (const UpdateNode *un = read->updates.head.get(); un; un = un->next.get())
+      for (const UpdateNode *un = read->updates.head.get(); un;
+           un = un->next.get())
         us.push_back(un);
 
       for (auto it = us.rbegin(); it != us.rend(); it++) {
@@ -377,8 +403,7 @@ ref<Expr> ExprOptimizer::getSelectOptExpr(
           ba.set(index);
         } else {
           ba.unset(index);
-          auto arrayValue =
-              dyn_cast<ConstantExpr>(un->value);
+          auto arrayValue = dyn_cast<ConstantExpr>(un->value);
           assert(arrayValue && "Not a constant expression");
           arrayConstValues[index] = arrayValue;
         }
@@ -394,11 +419,10 @@ ref<Expr> ExprOptimizer::getSelectOptExpr(
             elementIsConcrete = false;
             break;
           } else {
-            val |= (*(
-                         arrayConstValues[(i * bytesPerElement) + j]
-                             .get()
-                             ->getAPValue()
-                             .getRawData())
+            val |= (*(arrayConstValues[(i * bytesPerElement) + j]
+                          .get()
+                          ->getAPValue()
+                          .getRawData())
                     << (j * 8));
           }
         }
@@ -556,9 +580,10 @@ ref<Expr> ExprOptimizer::buildConstantSelectExpr(
           }
           currOr = tempOr;
         }
-        temp = SelectExpr::create(currOr, builder->Constant(llvm::APInt(
-                                              valWidth, range.first, false)),
-                                  result);
+        temp = SelectExpr::create(
+            currOr,
+            builder->Constant(llvm::APInt(valWidth, range.first, false)),
+            result);
       }
     }
     result = temp;

@@ -16,15 +16,22 @@
 #include "klee/Expr/Assignment.h"
 #include "klee/Expr/Constraints.h"
 #include "klee/Expr/ExprUtil.h"
-#include "klee/Support/OptionCategories.h"
 #include "klee/Solver/SolverImpl.h"
 #include "klee/Support/ErrorHandling.h"
+#include "klee/Support/OptionCategories.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Errno.h"
+DISABLE_WARNING_POP
 
+#include <array>
 #include <csignal>
+#include <memory>
 #include <sys/ipc.h>
+#include <sys/mman.h>
 #include <sys/shm.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -40,7 +47,24 @@ llvm::cl::opt<bool> IgnoreSolverFailures(
     "ignore-solver-failures", llvm::cl::init(false),
     llvm::cl::desc("Ignore any STP solver failures (default=false)"),
     llvm::cl::cat(klee::SolvingCat));
-}
+
+enum SAT { MINISAT, SIMPLEMINISAT, CRYPTOMINISAT, RISS };
+const std::array<std::string, 4> SATNames{"MiniSat", "simplifying MiniSat",
+                                          "CryptoMiniSat", "RISS"};
+
+llvm::cl::opt<SAT> SATSolver(
+    "stp-sat-solver",
+    llvm::cl::desc(
+        "Set the underlying SAT solver for STP (default=cryptominisat)"),
+    llvm::cl::values(clEnumValN(SAT::MINISAT, "minisat",
+                                SATNames[SAT::MINISAT]),
+                     clEnumValN(SAT::SIMPLEMINISAT, "simpleminisat",
+                                SATNames[SAT::SIMPLEMINISAT]),
+                     clEnumValN(SAT::CRYPTOMINISAT, "cryptominisat",
+                                SATNames[SAT::CRYPTOMINISAT]),
+                     clEnumValN(SAT::RISS, "riss", SATNames[SAT::RISS])),
+    llvm::cl::init(CRYPTOMINISAT), llvm::cl::cat(klee::SolvingCat));
+} // namespace
 
 #define vc_bvBoolExtract IAMTHESPAWNOFSATAN
 
@@ -67,7 +91,7 @@ namespace klee {
 class STPSolverImpl : public SolverImpl {
 private:
   VC vc;
-  STPBuilder *builder;
+  std::unique_ptr<STPBuilder> builder;
   time::Span timeout;
   bool useForkedSTP;
   SolverRunStatus runStatusCode;
@@ -77,21 +101,23 @@ public:
   ~STPSolverImpl() override;
 
   char *getConstraintLog(const Query &) override;
-  void setCoreSolverTimeout(time::Span timeout) override { this->timeout = timeout; }
+  void setCoreSolverTimeout(time::Span timeout) override {
+    this->timeout = timeout;
+  }
 
   bool computeTruth(const Query &, bool &isValid) override;
   bool computeValue(const Query &, ref<Expr> &result) override;
   bool computeInitialValues(const Query &,
                             const std::vector<const Array *> &objects,
-                            std::vector<std::vector<unsigned char>> &values,
+                            std::vector<SparseStorage<unsigned char>> &values,
                             bool &hasSolution) override;
   SolverRunStatus getOperationStatusCode() override;
 };
 
 STPSolverImpl::STPSolverImpl(bool useForkedSTP, bool optimizeDivides)
     : vc(vc_createValidityChecker()),
-      builder(new STPBuilder(vc, optimizeDivides)),
-      useForkedSTP(useForkedSTP), runStatusCode(SOLVER_RUN_STATUS_FAILURE) {
+      builder(new STPBuilder(vc, optimizeDivides)), useForkedSTP(useForkedSTP),
+      runStatusCode(SOLVER_RUN_STATUS_FAILURE) {
   assert(vc && "unable to create validity checker");
   assert(builder && "unable to create STPBuilder");
 
@@ -102,6 +128,49 @@ STPSolverImpl::STPSolverImpl(bool useForkedSTP, bool optimizeDivides)
   // the pointers using vc_DeleteExpr.  By setting EXPRDELETE to 0
   // we restore the old behaviour.
   vc_setInterfaceFlags(vc, EXPRDELETE, 0);
+
+  // set SAT solver
+  bool SATSolverAvailable = false;
+  bool specifiedOnCommandLine = SATSolver.getNumOccurrences() > 0;
+  switch (SATSolver) {
+  case SAT::MINISAT: {
+    SATSolverAvailable = vc_useMinisat(vc);
+    break;
+  }
+  case SAT::SIMPLEMINISAT: {
+    SATSolverAvailable = vc_useSimplifyingMinisat(vc);
+    break;
+  }
+  case SAT::CRYPTOMINISAT: {
+    SATSolverAvailable = vc_useCryptominisat(vc);
+    break;
+  }
+  case SAT::RISS: {
+    SATSolverAvailable = vc_useRiss(vc);
+    break;
+  }
+  default:
+    assert(false && "Illegal SAT solver value.");
+  }
+
+  // print SMT/SAT status
+  const auto expectedSATName = SATNames[SATSolver.getValue()];
+  std::string SATName{"unknown"};
+  if (vc_isUsingMinisat(vc))
+    SATName = SATNames[SAT::MINISAT];
+  else if (vc_isUsingSimplifyingMinisat(vc))
+    SATName = SATNames[SAT::SIMPLEMINISAT];
+  else if (vc_isUsingCryptominisat(vc))
+    SATName = SATNames[SAT::CRYPTOMINISAT];
+  else if (vc_isUsingRiss(vc))
+    SATName = SATNames[SAT::RISS];
+
+  if (!specifiedOnCommandLine || SATSolverAvailable) {
+    klee_message("SAT solver: %s", SATName.c_str());
+  } else {
+    klee_warning("%s not supported by STP", expectedSATName.c_str());
+    klee_message("Fallback SAT solver: %s", SATName.c_str());
+  }
 
   make_division_total(vc);
 
@@ -126,7 +195,7 @@ STPSolverImpl::~STPSolverImpl() {
   shared_memory_ptr = nullptr;
   shared_memory_id = 0;
 
-  delete builder;
+  builder.reset();
 
   vc_Destroy(vc);
 }
@@ -136,7 +205,7 @@ STPSolverImpl::~STPSolverImpl() {
 char *STPSolverImpl::getConstraintLog(const Query &query) {
   vc_push(vc);
 
-  for (const auto &constraint : query.constraints)
+  for (const auto &constraint : query.constraints.cs())
     vc_assertFormula(vc, builder->construct(constraint));
   assert(query.expr == ConstantExpr::alloc(0, Expr::Bool) &&
          "Unexpected expression in query!");
@@ -151,7 +220,7 @@ char *STPSolverImpl::getConstraintLog(const Query &query) {
 
 bool STPSolverImpl::computeTruth(const Query &query, bool &isValid) {
   std::vector<const Array *> objects;
-  std::vector<std::vector<unsigned char>> values;
+  std::vector<SparseStorage<unsigned char>> values;
   bool hasSolution;
 
   if (!computeInitialValues(query, objects, values, hasSolution))
@@ -163,7 +232,7 @@ bool STPSolverImpl::computeTruth(const Query &query, bool &isValid) {
 
 bool STPSolverImpl::computeValue(const Query &query, ref<Expr> &result) {
   std::vector<const Array *> objects;
-  std::vector<std::vector<unsigned char>> values;
+  std::vector<SparseStorage<unsigned char>> values;
   bool hasSolution;
 
   // Find the object used in the expression, and compute an assignment
@@ -183,7 +252,7 @@ bool STPSolverImpl::computeValue(const Query &query, ref<Expr> &result) {
 static SolverImpl::SolverRunStatus
 runAndGetCex(::VC vc, STPBuilder *builder, ::VCExpr q,
              const std::vector<const Array *> &objects,
-             std::vector<std::vector<unsigned char>> &values,
+             std::vector<SparseStorage<unsigned char>> &values,
              bool &hasSolution) {
   // XXX I want to be able to timeout here, safely
   hasSolution = !vc_query(vc, q);
@@ -194,12 +263,21 @@ runAndGetCex(::VC vc, STPBuilder *builder, ::VCExpr q,
   values.reserve(objects.size());
   unsigned i = 0; // FIXME C++17: use reference from emplace_back()
   for (const auto object : objects) {
-    values.emplace_back(object->size);
+    uint64_t objectSize = 0;
+    if (ref<ConstantExpr> sizeExpr = dyn_cast<ConstantExpr>(object->size)) {
+      objectSize = sizeExpr->getZExtValue();
+    } else {
+      ExprHandle sizeHandle = builder->construct(object->size);
+      objectSize = getBVUnsignedLongLong(sizeHandle);
+    }
 
-    for (unsigned offset = 0; offset < object->size; offset++) {
+    values.emplace_back(objectSize);
+
+    for (unsigned offset = 0; offset < objectSize; offset++) {
       ExprHandle counter =
           vc_getCounterExample(vc, builder->getInitialRead(object, offset));
-      values[i][offset] = static_cast<unsigned char>(getBVUnsigned(counter));
+      values[i].store(offset,
+                      static_cast<unsigned char>(getBVUnsigned(counter)));
     }
     ++i;
   }
@@ -212,25 +290,33 @@ static void stpTimeoutHandler(int x) { _exit(52); }
 static SolverImpl::SolverRunStatus
 runAndGetCexForked(::VC vc, STPBuilder *builder, ::VCExpr q,
                    const std::vector<const Array *> &objects,
-                   std::vector<std::vector<unsigned char>> &values,
+                   std::vector<SparseStorage<unsigned char>> &values,
                    bool &hasSolution, time::Span timeout) {
   unsigned char *pos = shared_memory_ptr;
-  unsigned sum = 0;
-  for (const auto object : objects)
-    sum += object->size;
-  if (sum >= shared_memory_size)
-    llvm::report_fatal_error("not enough shared memory for counterexample");
+  // unsigned sum = 0;
+  // for (const auto object : objects)
+  //   sum += object->size;
+  // if (sum >= shared_memory_size)
+  //   llvm::report_fatal_error("not enough shared memory for counterexample");
 
   fflush(stdout);
   fflush(stderr);
+
+  // We will allocate additional buffer for shared memory
+  size_t memory_object_size = objects.size() * sizeof(uint64_t);
+  uint64_t *shared_memory_object_sizes = static_cast<uint64_t *>(
+      mmap(NULL, memory_object_size, PROT_READ | PROT_WRITE,
+           MAP_SHARED | MAP_ANONYMOUS, -1, 0));
 
   // fork solver
   int pid = fork();
   // - error
   if (pid == -1) {
-    klee_warning("fork failed (for STP) - %s", llvm::sys::StrError(errno).c_str());
+    klee_warning("fork failed (for STP) - %s",
+                 llvm::sys::StrError(errno).c_str());
     if (!IgnoreSolverFailures)
       exit(1);
+    munmap(shared_memory_object_sizes, memory_object_size);
     return SolverImpl::SOLVER_RUN_STATUS_FORK_FAILED;
   }
   // - child (solver)
@@ -242,8 +328,23 @@ runAndGetCexForked(::VC vc, STPBuilder *builder, ::VCExpr q,
     }
     int res = vc_query(vc, q);
     if (!res) {
-      for (const auto object : objects) {
-        for (unsigned offset = 0; offset < object->size; offset++) {
+      for (unsigned idx = 0; idx < objects.size(); ++idx) {
+        const Array *object = objects[idx];
+
+        /* Receive size for array */
+        unsigned int sizeConstant = 0;
+        if (ref<ConstantExpr> sizeExpr = dyn_cast<ConstantExpr>(object->size)) {
+          sizeConstant = sizeExpr->getZExtValue();
+        } else {
+          ExprHandle sizeHandle = builder->construct(object->size);
+          sizeConstant =
+              getBVUnsignedLongLong(vc_getCounterExample(vc, sizeHandle));
+        }
+        shared_memory_object_sizes[idx] = sizeConstant;
+
+        /* Then fill required bytes */
+        for (unsigned offset = 0; offset < shared_memory_object_sizes[idx];
+             offset++) {
           ExprHandle counter =
               vc_getCounterExample(vc, builder->getInitialRead(object, offset));
           *pos++ = static_cast<unsigned char>(getBVUnsigned(counter));
@@ -251,7 +352,7 @@ runAndGetCexForked(::VC vc, STPBuilder *builder, ::VCExpr q,
       }
     }
     _exit(res);
-  // - parent
+    // - parent
   } else {
     int status;
     pid_t res;
@@ -262,6 +363,7 @@ runAndGetCexForked(::VC vc, STPBuilder *builder, ::VCExpr q,
 
     if (res < 0) {
       klee_warning("waitpid() for STP failed");
+      munmap(shared_memory_object_sizes, memory_object_size);
       if (!IgnoreSolverFailures)
         exit(1);
       return SolverImpl::SOLVER_RUN_STATUS_WAITPID_FAILED;
@@ -273,6 +375,7 @@ runAndGetCexForked(::VC vc, STPBuilder *builder, ::VCExpr q,
     if (WIFSIGNALED(status) || !WIFEXITED(status)) {
       klee_warning("STP did not return successfully.  Most likely you forgot "
                    "to run 'ulimit -s unlimited'");
+      munmap(shared_memory_object_sizes, memory_object_size);
       if (!IgnoreSolverFailures) {
         exit(1);
       }
@@ -286,14 +389,18 @@ runAndGetCexForked(::VC vc, STPBuilder *builder, ::VCExpr q,
       hasSolution = true;
 
       values.reserve(objects.size());
-      for (const auto object : objects) {
-        values.emplace_back(pos, pos + object->size);
-        pos += object->size;
+      for (unsigned idx = 0; idx < objects.size(); ++idx) {
+        uint64_t objectSize = shared_memory_object_sizes[idx];
+        values.emplace_back(objectSize, 0);
+        values.back().store(0, pos, pos + objectSize);
+        pos += objectSize;
       }
 
+      munmap(shared_memory_object_sizes, memory_object_size);
       return SolverImpl::SOLVER_RUN_STATUS_SUCCESS_SOLVABLE;
     }
 
+    munmap(shared_memory_object_sizes, memory_object_size);
     // unsolvable
     if (exitcode == 1) {
       hasSolution = false;
@@ -317,16 +424,16 @@ runAndGetCexForked(::VC vc, STPBuilder *builder, ::VCExpr q,
 
 bool STPSolverImpl::computeInitialValues(
     const Query &query, const std::vector<const Array *> &objects,
-    std::vector<std::vector<unsigned char>> &values, bool &hasSolution) {
+    std::vector<SparseStorage<unsigned char>> &values, bool &hasSolution) {
   runStatusCode = SOLVER_RUN_STATUS_FAILURE;
   TimerStatIncrementer t(stats::queryTime);
 
   vc_push(vc);
 
-  for (const auto &constraint : query.constraints)
+  for (const auto &constraint : query.constraints.cs())
     vc_assertFormula(vc, builder->construct(constraint));
 
-  ++stats::queries;
+  ++stats::solverQueries;
   ++stats::queryCounterexamples;
 
   ExprHandle stp_e = builder->construct(query.expr);
@@ -341,13 +448,13 @@ bool STPSolverImpl::computeInitialValues(
 
   bool success;
   if (useForkedSTP) {
-    runStatusCode = runAndGetCexForked(vc, builder, stp_e, objects, values,
-                                       hasSolution, timeout);
+    runStatusCode = runAndGetCexForked(vc, builder.get(), stp_e, objects,
+                                       values, hasSolution, timeout);
     success = ((SOLVER_RUN_STATUS_SUCCESS_SOLVABLE == runStatusCode) ||
                (SOLVER_RUN_STATUS_SUCCESS_UNSOLVABLE == runStatusCode));
   } else {
     runStatusCode =
-        runAndGetCex(vc, builder, stp_e, objects, values, hasSolution);
+        runAndGetCex(vc, builder.get(), stp_e, objects, values, hasSolution);
     success = true;
   }
 
@@ -368,7 +475,7 @@ SolverImpl::SolverRunStatus STPSolverImpl::getOperationStatusCode() {
 }
 
 STPSolver::STPSolver(bool useForkedSTP, bool optimizeDivides)
-    : Solver(new STPSolverImpl(useForkedSTP, optimizeDivides)) {}
+    : Solver(std::make_unique<STPSolverImpl>(useForkedSTP, optimizeDivides)) {}
 
 char *STPSolver::getConstraintLog(const Query &query) {
   return impl->getConstraintLog(query);
@@ -378,5 +485,5 @@ void STPSolver::setCoreSolverTimeout(time::Span timeout) {
   impl->setCoreSolverTimeout(timeout);
 }
 
-} // klee
+} // namespace klee
 #endif // ENABLE_STP

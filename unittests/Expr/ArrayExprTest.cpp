@@ -9,12 +9,18 @@
 
 #include "gtest/gtest.h"
 
+#include "klee/ADT/SparseStorage.h"
 #include "klee/Expr/ArrayCache.h"
 #include "klee/Expr/ArrayExprOptimizer.h"
 #include "klee/Expr/Assignment.h"
 #include "klee/Expr/Expr.h"
+#include "klee/Expr/SourceBuilder.h"
 
-#include <llvm/Support/CommandLine.h>
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
+#include "llvm/Support/CommandLine.h"
+DISABLE_WARNING_POP
 
 #include <iostream>
 
@@ -37,10 +43,12 @@ TEST(ArrayExprTest, HashCollisions) {
   klee::OptimizeArray = ALL;
   std::vector<ref<ConstantExpr>> constVals(256,
                                            ConstantExpr::create(5, Expr::Int8));
-  const Array *array = ac.CreateArray("arr0", 256, constVals.data(),
-                                      constVals.data() + constVals.size(),
-                                      Expr::Int32, Expr::Int8);
-  const Array *symArray = ac.CreateArray("symIdx", 4);
+  const Array *array = ac.CreateArray(
+      ConstantExpr::create(256, sizeof(uint64_t) * CHAR_BIT),
+      SourceBuilder::constant(constVals), Expr::Int32, Expr::Int8);
+  const Array *symArray =
+      ac.CreateArray(ConstantExpr::create(4, sizeof(uint64_t) * CHAR_BIT),
+                     SourceBuilder::makeSymbolic("symIdx", 0));
   ref<Expr> symIdx = Expr::createTempRead(symArray, Expr::Int32);
   UpdateList ul(array, 0);
   ul.extend(getConstant(3, Expr::Int32), getConstant(11, Expr::Int8));
@@ -54,8 +62,8 @@ TEST(ArrayExprTest, HashCollisions) {
   ASSERT_NE(updatedRead, firstRead);
   ASSERT_EQ(updatedRead->hash(), firstRead->hash());
 
-  std::vector<unsigned char> value = {6, 0, 0, 0};
-  std::vector<std::vector<unsigned char>> values = {value};
+  SparseStorage<unsigned char> value({6, 0, 0, 0});
+  std::vector<SparseStorage<unsigned char>> values = {value};
   std::vector<const Array *> assigmentArrays = {symArray};
   auto a = std::make_unique<Assignment>(assigmentArrays, values,
                                         /*_allowFreeValues=*/true);
@@ -74,4 +82,4 @@ TEST(ArrayExprTest, HashCollisions) {
   EXPECT_EQ(a->evaluate(oUpdatedRead), getConstant(42, Expr::Int8));
   EXPECT_EQ(a->evaluate(oFirstRead), getConstant(5, Expr::Int8));
 }
-}
+} // namespace

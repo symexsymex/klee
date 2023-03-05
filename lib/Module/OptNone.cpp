@@ -11,10 +11,14 @@
 
 #include "klee/Config/Version.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Module.h"
+DISABLE_WARNING_POP
 
 namespace klee {
 
@@ -23,7 +27,7 @@ char OptNonePass::ID;
 bool OptNonePass::runOnModule(llvm::Module &M) {
   // Find list of functions that start with `klee_`
   // and mark all functions that contain such call or invoke as optnone
-  llvm::SmallPtrSet<llvm::Function *,16> CallingFunctions;
+  llvm::SmallPtrSet<llvm::Function *, 16> CallingFunctions;
   for (auto &F : M) {
     if (!F.hasName() || !F.getName().startswith("klee_"))
       continue;

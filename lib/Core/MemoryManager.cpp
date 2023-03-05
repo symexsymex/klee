@@ -8,23 +8,38 @@
 //===----------------------------------------------------------------------===//
 
 #include "MemoryManager.h"
+#include "AddressManager.h"
 
 #include "CoreStats.h"
+#include "ExecutionState.h"
 #include "Memory.h"
 
 #include "klee/Expr/Expr.h"
+#include "klee/Expr/SourceBuilder.h"
 #include "klee/Support/ErrorHandling.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MathExtras.h"
+#if LLVM_VERSION_CODE >= LLVM_VERSION(10, 0)
+#include "llvm/Support/Alignment.h"
+#else
+#include "llvm/Support/MathExtras.h"
+#endif
+DISABLE_WARNING_POP
 
-#include <inttypes.h>
+#include <algorithm>
+#include <cinttypes>
+#include <string>
 #include <sys/mman.h>
+#include <tuple>
 
 using namespace klee;
 
 namespace {
-
 llvm::cl::OptionCategory MemoryCat("Memory management options",
                                    "These options control memory management.");
 
@@ -57,6 +72,23 @@ llvm::cl::opt<unsigned long long> DeterministicStartAddress(
                    "aligned (default=0x7ff30000000)"),
     llvm::cl::init(0x7ff30000000), llvm::cl::cat(MemoryCat));
 } // namespace
+
+llvm::cl::opt<uint64_t> MaxConstantAllocationSize(
+    "max-constant-alloc",
+    llvm::cl::desc(
+        "Maximum available size for single allocation (default 10Mb)"),
+    llvm::cl::init(10ll << 20), llvm::cl::cat(MemoryCat));
+
+llvm::cl::opt<uint64_t> MaxSymbolicAllocationSize(
+    "max-sym-alloc",
+    llvm::cl::desc(
+        "Maximum available size for single allocation (default 10Mb)"),
+    llvm::cl::init(10ll << 20), llvm::cl::cat(MemoryCat));
+
+llvm::cl::opt<bool> UseSymbolicSizeAllocation(
+    "use-sym-size-alloc",
+    llvm::cl::desc("Allows symbolic size allocation (default false)"),
+    llvm::cl::init(false), llvm::cl::cat(MemoryCat));
 
 /***/
 MemoryManager::MemoryManager(ArrayCache *_arrayCache)
@@ -97,13 +129,16 @@ MemoryManager::~MemoryManager() {
 }
 
 MemoryObject *MemoryManager::allocate(uint64_t size, bool isLocal,
-                                      bool isGlobal,
+                                      bool isGlobal, bool isLazyInitialiazed,
                                       const llvm::Value *allocSite,
-                                      size_t alignment) {
-  if (size > 10 * 1024 * 1024)
-    klee_warning_once(0, "Large alloc: %" PRIu64
-                         " bytes.  KLEE may run out of memory.",
-                      size);
+                                      size_t alignment, ref<Expr> addressExpr,
+                                      ref<Expr> sizeExpr, unsigned timestamp,
+                                      IDType id) {
+  if (size > MaxConstantAllocationSize) {
+    klee_warning_once(
+        0, "Large alloc: %" PRIu64 " bytes.  KLEE models out of memory.", size);
+    return 0;
+  }
 
   // Return NULL if size is zero, this is equal to error during allocation
   if (NullOnZeroMalloc && size == 0)
@@ -124,8 +159,9 @@ MemoryObject *MemoryManager::allocate(uint64_t size, bool isLocal,
     if ((char *)address + alloc_size < deterministicSpace + spaceSize) {
       nextFreeSlot = (char *)address + alloc_size + RedzoneSize;
     } else {
-      klee_warning_once(0, "Couldn't allocate %" PRIu64
-                           " bytes. Not enough deterministic space left.",
+      klee_warning_once(0,
+                        "Couldn't allocate %" PRIu64
+                        " bytes. Not enough deterministic space left.",
                         size);
       address = 0;
     }
@@ -146,8 +182,14 @@ MemoryObject *MemoryManager::allocate(uint64_t size, bool isLocal,
     return 0;
 
   ++stats::allocations;
-  MemoryObject *res = new MemoryObject(address, size, isLocal, isGlobal, false,
-                                       allocSite, this);
+  MemoryObject *res = new MemoryObject(
+      address, size, alignment, isLocal, isGlobal, false, isLazyInitialiazed,
+      allocSite, this, addressExpr, sizeExpr, timestamp);
+  if (id) {
+    res->id = id;
+  }
+  allocatedSizes[res->id][size] = res;
+
   objects.insert(res);
   return res;
 }
@@ -164,8 +206,8 @@ MemoryObject *MemoryManager::allocateFixed(uint64_t address, uint64_t size,
 #endif
 
   ++stats::allocations;
-  MemoryObject *res =
-      new MemoryObject(address, size, false, true, true, allocSite, this);
+  MemoryObject *res = new MemoryObject(address, size, 8, false, true, true,
+                                       false, allocSite, this);
   objects.insert(res);
   return res;
 }
@@ -174,10 +216,19 @@ void MemoryManager::deallocate(const MemoryObject *mo) { assert(0); }
 
 void MemoryManager::markFreed(MemoryObject *mo) {
   if (objects.find(mo) != objects.end()) {
+    allocatedSizes[mo->id].erase(mo->size);
+    if (allocatedSizes[mo->id].empty()) {
+      am->bindingsAdressesToObjects.erase(mo->getBaseExpr());
+    }
     if (!mo->isFixed && !DeterministicAllocation)
       free((void *)mo->address);
     objects.erase(mo);
   }
+}
+
+const std::map<uint64_t, MemoryObject *> &
+MemoryManager::getAllocatedObjects(IDType idObject) {
+  return allocatedSizes[idObject];
 }
 
 size_t MemoryManager::getUsedDeterministicSize() {

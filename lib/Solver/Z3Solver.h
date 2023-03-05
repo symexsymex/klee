@@ -1,5 +1,4 @@
-//===-- Z3Solver.h
-//---------------------------------------------------===//
+//===-- Z3Solver.h ---------------------------------------------*- C++ -*-====//
 //
 //                     The KLEE Symbolic Virtual Machine
 //
@@ -13,12 +12,17 @@
 
 #include "klee/Solver/Solver.h"
 
+#define Z3_TRUE true
+#define Z3_FALSE false
+
 namespace klee {
+enum Z3BuilderType { KLEE_CORE, KLEE_BITVECTOR };
+
 /// Z3Solver - A complete solver based on Z3
 class Z3Solver : public Solver {
 public:
   /// Z3Solver - Construct a new Z3Solver.
-  Z3Solver();
+  Z3Solver(Z3BuilderType type);
 
   /// Get the query in SMT-LIBv2 format.
   /// \return A C-style string. The caller is responsible for freeing this.
@@ -29,6 +33,6 @@ public:
   /// is off.
   virtual void setCoreSolverTimeout(time::Span timeout);
 };
-}
+} // namespace klee
 
 #endif /* KLEE_Z3SOLVER_H */

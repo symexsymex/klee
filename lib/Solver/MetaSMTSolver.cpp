@@ -9,17 +9,21 @@
 #include "klee/Config/config.h"
 
 #ifdef ENABLE_METASMT
-#include "MetaSMTSolver.h"
 #include "MetaSMTBuilder.h"
+#include "MetaSMTSolver.h"
 
 #include "klee/Expr/Assignment.h"
 #include "klee/Expr/Constraints.h"
 #include "klee/Expr/ExprUtil.h"
-#include "klee/Support/ErrorHandling.h"
 #include "klee/Solver/Solver.h"
 #include "klee/Solver/SolverImpl.h"
+#include "klee/Support/ErrorHandling.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/Support/ErrorHandling.h"
+DISABLE_WARNING_POP
 
 #include <metaSMT/DirectSolver_Context.hpp>
 
@@ -51,9 +55,12 @@
 #undef type_t
 #endif
 
+#include <memory>
+
 #include <errno.h>
 #include <signal.h>
 #include <sys/ipc.h>
+#include <sys/mman.h>
 #include <sys/shm.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -85,7 +92,6 @@ private:
 public:
   MetaSMTSolverImpl(MetaSMTSolver<SolverContext> *solver, bool useForked,
                     bool optimizeDivides);
-  virtual ~MetaSMTSolverImpl();
 
   char *getConstraintLog(const Query &);
   void setCoreSolverTimeout(time::Span timeout) { _timeout = timeout; }
@@ -95,18 +101,18 @@ public:
 
   bool computeInitialValues(const Query &query,
                             const std::vector<const Array *> &objects,
-                            std::vector<std::vector<unsigned char> > &values,
+                            std::vector<SparseStorage<unsigned char>> &values,
                             bool &hasSolution);
 
   SolverImpl::SolverRunStatus
   runAndGetCex(const Query &query, const std::vector<const Array *> &objects,
-               std::vector<std::vector<unsigned char> > &values,
+               std::vector<SparseStorage<unsigned char>> &values,
                bool &hasSolution);
 
   SolverImpl::SolverRunStatus
   runAndGetCexForked(const Query &query,
                      const std::vector<const Array *> &objects,
-                     std::vector<std::vector<unsigned char> > &values,
+                     std::vector<SparseStorage<unsigned char>> &values,
                      bool &hasSolution, time::Span timeout);
 
   SolverRunStatus getOperationStatusCode();
@@ -134,9 +140,6 @@ MetaSMTSolverImpl<SolverContext>::MetaSMTSolverImpl(
 }
 
 template <typename SolverContext>
-MetaSMTSolverImpl<SolverContext>::~MetaSMTSolverImpl() {}
-
-template <typename SolverContext>
 char *MetaSMTSolverImpl<SolverContext>::getConstraintLog(const Query &) {
   const char *msg = "Not supported";
   char *buf = new char[strlen(msg) + 1];
@@ -150,7 +153,7 @@ bool MetaSMTSolverImpl<SolverContext>::computeTruth(const Query &query,
 
   bool success = false;
   std::vector<const Array *> objects;
-  std::vector<std::vector<unsigned char> > values;
+  std::vector<SparseStorage<unsigned char>> values;
   bool hasSolution;
 
   if (computeInitialValues(query, objects, values, hasSolution)) {
@@ -168,7 +171,7 @@ bool MetaSMTSolverImpl<SolverContext>::computeValue(const Query &query,
 
   bool success = false;
   std::vector<const Array *> objects;
-  std::vector<std::vector<unsigned char> > values;
+  std::vector<SparseStorage<unsigned char>> values;
   bool hasSolution;
 
   // Find the object used in the expression, and compute an assignment for them.
@@ -187,14 +190,14 @@ bool MetaSMTSolverImpl<SolverContext>::computeValue(const Query &query,
 template <typename SolverContext>
 bool MetaSMTSolverImpl<SolverContext>::computeInitialValues(
     const Query &query, const std::vector<const Array *> &objects,
-    std::vector<std::vector<unsigned char> > &values, bool &hasSolution) {
+    std::vector<SparseStorage<unsigned char>> &values, bool &hasSolution) {
 
   _runStatusCode = SOLVER_RUN_STATUS_FAILURE;
 
   TimerStatIncrementer t(stats::queryTime);
   assert(_builder);
 
-  ++stats::queries;
+  ++stats::solverQueries;
   ++stats::queryCounterexamples;
 
   bool success = true;
@@ -222,10 +225,10 @@ bool MetaSMTSolverImpl<SolverContext>::computeInitialValues(
 template <typename SolverContext>
 SolverImpl::SolverRunStatus MetaSMTSolverImpl<SolverContext>::runAndGetCex(
     const Query &query, const std::vector<const Array *> &objects,
-    std::vector<std::vector<unsigned char> > &values, bool &hasSolution) {
+    std::vector<SparseStorage<unsigned char>> &values, bool &hasSolution) {
 
   // assume the constraints of the query
-  for (auto &constraint : query.constraints)
+  for (auto &constraint : query.constraints.cs())
     assumption(_meta_solver, _builder->construct(constraint));
 
   // assume the negation of the query
@@ -233,6 +236,20 @@ SolverImpl::SolverRunStatus MetaSMTSolverImpl<SolverContext>::runAndGetCex(
   hasSolution = solve(_meta_solver);
 
   if (hasSolution) {
+    std::unordered_map<const Array *, std::vector<unsigned>> readOffsets;
+    constraints_ty allConstraints = query.constraints.cs();
+    allConstraints.insert(query.expr);
+    for (ref<Expr> expr : allConstraints) {
+      std::vector<ref<ReadExpr>> reads;
+      findReads(expr, true, reads);
+      for (ref<ReadExpr> read : reads) {
+        const Array *array = read->updates.root;
+        unsigned offset =
+            metaSMT::read_value(_meta_solver, _builder->construct(read->index));
+        readOffsets[array].push_back(offset);
+      }
+    }
+
     values.reserve(objects.size());
     for (std::vector<const Array *>::const_iterator it = objects.begin(),
                                                     ie = objects.end();
@@ -243,15 +260,21 @@ SolverImpl::SolverRunStatus MetaSMTSolverImpl<SolverContext>::runAndGetCex(
       typename SolverContext::result_type array_exp =
           _builder->getInitialArray(array);
 
-      std::vector<unsigned char> data;
-      data.reserve(array->size);
+      size_t constantSize = 0;
+      if (ref<ConstantExpr> sizeExpr = dyn_cast<ConstantExpr>(array->size)) {
+        constantSize = sizeExpr->getZExtValue();
+      } else {
+        constantSize =
+            read_value(_meta_solver, _builder->construct(array->size));
+      }
+      SparseStorage<unsigned char> data(constantSize, 0);
 
-      for (unsigned offset = 0; offset < array->size; offset++) {
+      for (unsigned offset : readOffsets.at(array)) {
         typename SolverContext::result_type elem_exp = evaluate(
             _meta_solver, metaSMT::logic::Array::select(
                               array_exp, bvuint(offset, array->getDomain())));
         unsigned char elem_value = metaSMT::read_value(_meta_solver, elem_exp);
-        data.push_back(elem_value);
+        data.store(offset, elem_value);
       }
 
       values.push_back(data);
@@ -271,25 +294,30 @@ template <typename SolverContext>
 SolverImpl::SolverRunStatus
 MetaSMTSolverImpl<SolverContext>::runAndGetCexForked(
     const Query &query, const std::vector<const Array *> &objects,
-    std::vector<std::vector<unsigned char> > &values, bool &hasSolution,
+    std::vector<SparseStorage<unsigned char>> &values, bool &hasSolution,
     time::Span timeout) {
   unsigned char *pos = shared_memory_ptr;
-  unsigned sum = 0;
-  for (std::vector<const Array *>::const_iterator it = objects.begin(),
-                                                  ie = objects.end();
-       it != ie; ++it) {
-    sum += (*it)->size;
-  }
+  // unsigned sum = 0;
+  // for (std::vector<const Array *>::const_iterator it = objects.begin(),
+  //                                                 ie = objects.end();
+  //      it != ie; ++it) {
+  //   sum += (*it)->size;
+  // }
   // sum += sizeof(uint64_t);
-  sum += sizeof(stats::queryConstructs);
-  assert(sum < shared_memory_size &&
-         "not enough shared memory for counterexample");
+  // sum += sizeof(stats::queryConstructs);
+  // assert(sum < shared_memory_size &&
+  //        "not enough shared memory for counterexample");
+  size_t shared_memory_sizes_size = objects.size() * sizeof(uint64_t);
+  uint64_t *shared_memory_sizes_ptr = static_cast<uint64_t *>(
+      mmap(NULL, shared_memory_sizes_size, PROT_READ | PROT_WRITE,
+           MAP_SHARED | MAP_ANONYMOUS, -1, 0));
 
   fflush(stdout);
   fflush(stderr);
   int pid = fork();
   if (pid == -1) {
     klee_warning("fork failed (for metaSMT)");
+    munmap(shared_memory_sizes_ptr, shared_memory_sizes_size);
     return SolverImpl::SOLVER_RUN_STATUS_FORK_FAILED;
   }
 
@@ -301,7 +329,7 @@ MetaSMTSolverImpl<SolverContext>::runAndGetCexForked(
     }
 
     // assert constraints as we are in a child process
-    for (const auto &constraint : query.constraints) {
+    for (const auto &constraint : query.constraints.cs()) {
       assertion(_meta_solver, _builder->construct(constraint));
       // assumption(_meta_solver, _builder->construct(*it));
     }
@@ -312,16 +340,22 @@ MetaSMTSolverImpl<SolverContext>::runAndGetCexForked(
     unsigned res = solve(_meta_solver);
 
     if (res) {
-      for (std::vector<const Array *>::const_iterator it = objects.begin(),
-                                                      ie = objects.end();
-           it != ie; ++it) {
+      for (unsigned i = 0; i < objects.size(); ++i) {
 
-        const Array *array = *it;
+        const Array *array = objects[i];
         assert(array);
         typename SolverContext::result_type array_exp =
             _builder->getInitialArray(array);
 
-        for (unsigned offset = 0; offset < array->size; offset++) {
+        if (ref<ConstantExpr> sizeExpr = dyn_cast<ConstantExpr>(array->size)) {
+          shared_memory_sizes_ptr[i] = sizeExpr->getZExtValue();
+        } else {
+          shared_memory_sizes_ptr[i] = metaSMT::read_value(
+              _meta_solver, _builder->construct(array->size));
+        }
+
+        for (unsigned offset = 0; offset < shared_memory_sizes_ptr[i];
+             offset++) {
 
           typename SolverContext::result_type elem_exp = evaluate(
               _meta_solver, metaSMT::logic::Array::select(
@@ -346,6 +380,7 @@ MetaSMTSolverImpl<SolverContext>::runAndGetCexForked(
 
     if (res < 0) {
       klee_warning("waitpid() for metaSMT failed");
+      munmap(shared_memory_sizes_ptr, shared_memory_sizes_size);
       return SolverImpl::SOLVER_RUN_STATUS_WAITPID_FAILED;
     }
 
@@ -356,6 +391,7 @@ MetaSMTSolverImpl<SolverContext>::runAndGetCexForked(
       klee_warning(
           "error: metaSMT did not return successfully (status = %d) \n",
           WTERMSIG(status));
+      munmap(shared_memory_sizes_ptr, shared_memory_sizes_size);
       return SolverImpl::SOLVER_RUN_STATUS_INTERRUPTED;
     }
 
@@ -366,27 +402,26 @@ MetaSMTSolverImpl<SolverContext>::runAndGetCexForked(
       hasSolution = false;
     } else if (exitcode == 52) {
       klee_warning("metaSMT timed out");
+      munmap(shared_memory_sizes_ptr, shared_memory_sizes_size);
       return SolverImpl::SOLVER_RUN_STATUS_TIMEOUT;
     } else {
       klee_warning("metaSMT did not return a recognized code");
+      munmap(shared_memory_sizes_ptr, shared_memory_sizes_size);
       return SolverImpl::SOLVER_RUN_STATUS_UNEXPECTED_EXIT_CODE;
     }
 
     if (hasSolution) {
-      values = std::vector<std::vector<unsigned char> >(objects.size());
-      unsigned i = 0;
-      for (std::vector<const Array *>::const_iterator it = objects.begin(),
-                                                      ie = objects.end();
-           it != ie; ++it) {
-        const Array *array = *it;
-        assert(array);
-        std::vector<unsigned char> &data = values[i++];
-        data.insert(data.begin(), pos, pos + array->size);
-        pos += array->size;
+      values = std::vector<SparseStorage<unsigned char>>(objects.size());
+      for (unsigned i = 0; i < objects.size(); ++i) {
+        SparseStorage<unsigned char> &data = values[i];
+        data.resize(shared_memory_sizes_ptr[i]);
+        data.store(0, pos, pos + shared_memory_sizes_ptr[i]);
+        pos += shared_memory_sizes_ptr[i];
       }
     }
     stats::queryConstructs += (*((uint64_t *)pos) - stats::queryConstructs);
 
+    munmap(shared_memory_sizes_ptr, shared_memory_sizes_size);
     if (true == hasSolution) {
       return SolverImpl::SOLVER_RUN_STATUS_SUCCESS_SOLVABLE;
     } else {
@@ -404,8 +439,8 @@ MetaSMTSolverImpl<SolverContext>::getOperationStatusCode() {
 template <typename SolverContext>
 MetaSMTSolver<SolverContext>::MetaSMTSolver(bool useForked,
                                             bool optimizeDivides)
-    : Solver(new MetaSMTSolverImpl<SolverContext>(this, useForked,
-                                                  optimizeDivides)) {}
+    : Solver(std::make_unique<MetaSMTSolverImpl<SolverContext>>(
+          this, useForked, optimizeDivides)) {}
 
 template <typename SolverContext>
 MetaSMTSolver<SolverContext>::~MetaSMTSolver() {}
@@ -420,45 +455,50 @@ void MetaSMTSolver<SolverContext>::setCoreSolverTimeout(time::Span timeout) {
   impl->setCoreSolverTimeout(timeout);
 }
 
-Solver *createMetaSMTSolver() {
+std::unique_ptr<Solver> createMetaSMTSolver() {
   using namespace metaSMT;
 
-  Solver *coreSolver = NULL;
+  std::unique_ptr<Solver> coreSolver;
   std::string backend;
   switch (MetaSMTBackend) {
 #ifdef METASMT_HAVE_STP
   case METASMT_BACKEND_STP:
     backend = "STP";
-    coreSolver = new MetaSMTSolver<DirectSolver_Context<solver::STP_Backend> >(
+    coreSolver = std::make_unique<
+        MetaSMTSolver<DirectSolver_Context<solver::STP_Backend>>>(
         UseForkedCoreSolver, CoreSolverOptimizeDivides);
     break;
 #endif
 #ifdef METASMT_HAVE_Z3
   case METASMT_BACKEND_Z3:
     backend = "Z3";
-    coreSolver = new MetaSMTSolver<DirectSolver_Context<solver::Z3_Backend> >(
+    coreSolver = std::make_unique<
+        MetaSMTSolver<DirectSolver_Context<solver::Z3_Backend>>>(
         UseForkedCoreSolver, CoreSolverOptimizeDivides);
     break;
 #endif
 #ifdef METASMT_HAVE_BTOR
   case METASMT_BACKEND_BOOLECTOR:
     backend = "Boolector";
-    coreSolver = new MetaSMTSolver<DirectSolver_Context<solver::Boolector> >(
+    coreSolver = std::make_unique<
+        MetaSMTSolver<DirectSolver_Context<solver::Boolector>>>(
         UseForkedCoreSolver, CoreSolverOptimizeDivides);
     break;
 #endif
 #ifdef METASMT_HAVE_CVC4
   case METASMT_BACKEND_CVC4:
     backend = "CVC4";
-    coreSolver = new MetaSMTSolver<DirectSolver_Context<solver::CVC4> >(
-        UseForkedCoreSolver, CoreSolverOptimizeDivides);
+    coreSolver =
+        std::make_unique<MetaSMTSolver<DirectSolver_Context<solver::CVC4>>>(
+            UseForkedCoreSolver, CoreSolverOptimizeDivides);
     break;
 #endif
 #ifdef METASMT_HAVE_YICES2
   case METASMT_BACKEND_YICES2:
     backend = "Yices2";
-    coreSolver = new MetaSMTSolver<DirectSolver_Context<solver::Yices2> >(
-        UseForkedCoreSolver, CoreSolverOptimizeDivides);
+    coreSolver =
+        std::make_unique<MetaSMTSolver<DirectSolver_Context<solver::Yices2>>>(
+            UseForkedCoreSolver, CoreSolverOptimizeDivides);
     break;
 #endif
   default:
@@ -469,5 +509,5 @@ Solver *createMetaSMTSolver() {
   return coreSolver;
 }
 
-}
+} // namespace klee
 #endif // ENABLE_METASMT

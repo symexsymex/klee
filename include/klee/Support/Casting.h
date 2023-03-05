@@ -12,7 +12,11 @@
 
 #include "klee/Config/Version.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/Support/Casting.h"
+DISABLE_WARNING_POP
 
 namespace klee {
 
@@ -21,14 +25,7 @@ using llvm::cast_or_null;
 using llvm::dyn_cast;
 using llvm::dyn_cast_or_null;
 using llvm::isa;
-#if LLVM_VERSION_CODE >= LLVM_VERSION(9, 0)
 using llvm::isa_and_nonnull;
-#else
-template <typename... X, typename Y>
-inline bool isa_and_nonnull(const Y &value) {
-  return value && isa<X...>(value);
-}
-#endif
 
 } // namespace klee
 

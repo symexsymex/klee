@@ -8,23 +8,30 @@
 //===----------------------------------------------------------------------===//
 
 #include "ExternalDispatcher.h"
-#include "klee/Config/Version.h"
 
-#if LLVM_VERSION_CODE < LLVM_VERSION(8, 0)
-#include "llvm/IR/CallSite.h"
-#endif
+#include "CoreStats.h"
+#include "klee/Config/Version.h"
+#include "klee/Module/KCallable.h"
+#include "klee/Module/KModule.h"
+
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
+#include "llvm/ExecutionEngine/GenericValue.h"
+#include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
-#include "llvm/ExecutionEngine/GenericValue.h"
-#include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/Support/DynamicLibrary.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/raw_ostream.h"
+DISABLE_WARNING_POP
 
+#include <cfenv>
 #include <csetjmp>
 #include <csignal>
 
@@ -48,7 +55,7 @@ class ExternalDispatcherImpl {
 private:
   typedef std::map<const llvm::Instruction *, llvm::Function *> dispatchers_ty;
   dispatchers_ty dispatchers;
-  llvm::Function *createDispatcher(llvm::Function *f, llvm::Instruction *i,
+  llvm::Function *createDispatcher(KCallable *target, llvm::Instruction *i,
                                    llvm::Module *module);
   llvm::ExecutionEngine *executionEngine;
   LLVMContext &ctx;
@@ -62,8 +69,8 @@ private:
 public:
   ExternalDispatcherImpl(llvm::LLVMContext &ctx);
   ~ExternalDispatcherImpl();
-  bool executeCall(llvm::Function *function, llvm::Instruction *i,
-                   uint64_t *args);
+  bool executeCall(KCallable *callable, llvm::Instruction *i, uint64_t *args,
+                   int roundingMode);
   void *resolveSymbol(const std::string &name);
   int getLastErrno();
   void setLastErrno(int newErrno);
@@ -156,12 +163,29 @@ ExternalDispatcherImpl::~ExternalDispatcherImpl() {
   // we don't need to delete any of them.
 }
 
-bool ExternalDispatcherImpl::executeCall(Function *f, Instruction *i,
-                                         uint64_t *args) {
+bool ExternalDispatcherImpl::executeCall(KCallable *callable, Instruction *i,
+                                         uint64_t *args, int roundingMode) {
+  ++stats::externalCalls;
   dispatchers_ty::iterator it = dispatchers.find(i);
+  // Save current rounding mode used by KLEE internally and set the
+  // rounding mode needed during the external call.
+  int oldRoundingMode = fegetround();
+  bool success = !fesetround(roundingMode);
+  if (!success) {
+    llvm::errs() << "Failed to set rounding mode during external call\n";
+    abort();
+  }
+
   if (it != dispatchers.end()) {
     // Code already JIT'ed for this
-    return runProtectedCall(it->second, args);
+    bool result = runProtectedCall(it->second, args);
+    // Restore rounding mode.
+    success = !fesetround(oldRoundingMode);
+    if (!success) {
+      llvm::errs() << "Failed to restore rounding mode after externall call\n";
+      abort();
+    }
+    return result;
   }
 
   // Code for this not JIT'ed. Do this now.
@@ -183,7 +207,7 @@ bool ExternalDispatcherImpl::executeCall(Function *f, Instruction *i,
   // The MCJIT generates whole modules at a time so for every call that we
   // haven't made before we need to create a new Module.
   dispatchModule = new Module(getFreshModuleID(), ctx);
-  dispatcher = createDispatcher(f, i, dispatchModule);
+  dispatcher = createDispatcher(callable, i, dispatchModule);
   dispatchers.insert(std::make_pair(i, dispatcher));
 
   // Force the JIT execution engine to go ahead and build the function. This
@@ -206,7 +230,15 @@ bool ExternalDispatcherImpl::executeCall(Function *f, Instruction *i,
     // MCJIT didn't take ownership of the module so delete it.
     delete dispatchModule;
   }
-  return runProtectedCall(dispatcher, args);
+  bool result = runProtectedCall(dispatcher, args);
+
+  // Restore rounding mode.
+  success = !fesetround(oldRoundingMode);
+  if (!success) {
+    llvm::errs() << "Failed to restore rounding mode after externall call\n";
+    abort();
+  }
+  return result;
 }
 
 // FIXME: This is not reentrant.
@@ -252,21 +284,14 @@ bool ExternalDispatcherImpl::runProtectedCall(Function *f, uint64_t *args) {
 // the special cases that the JIT knows how to directly call. If this is not
 // done, then the jit will end up generating a nullary stub just to call our
 // stub, for every single function call.
-Function *ExternalDispatcherImpl::createDispatcher(Function *target,
+Function *ExternalDispatcherImpl::createDispatcher(KCallable *target,
                                                    Instruction *inst,
                                                    Module *module) {
-  if (!resolveSymbol(target->getName().str()))
+  if (isa<KFunction>(target) && !resolveSymbol(target->getName().str()))
     return 0;
 
-#if LLVM_VERSION_CODE >= LLVM_VERSION(8, 0)
-  const CallBase &cs = cast<CallBase>(*inst);
-#else
-  const CallSite cs(inst->getOpcode() == Instruction::Call
-                        ? CallSite(cast<CallInst>(inst))
-                        : CallSite(cast<InvokeInst>(inst)));
-#endif
-
-  Value **args = new Value *[cs.arg_size()];
+  const CallBase &cb = cast<CallBase>(*inst);
+  Value **args = new Value *[cb.arg_size()];
 
   std::vector<Type *> nullary;
 
@@ -291,12 +316,11 @@ Function *ExternalDispatcherImpl::createDispatcher(Function *target,
       argI64sp->getType()->getPointerElementType(), argI64sp, "args");
 
   // Get the target function type.
-  FunctionType *FTy = cast<FunctionType>(
-      cast<PointerType>(target->getType())->getElementType());
+  FunctionType *FTy = target->getFunctionType();
 
   // Each argument will be passed by writing it into gTheArgsP[i].
   unsigned i = 0, idx = 2;
-  for (auto ai = cs.arg_begin(), ae = cs.arg_end(); ai != ae; ++ai, ++i) {
+  for (auto ai = cb.arg_begin(), ae = cb.arg_end(); ai != ae; ++ai, ++i) {
     // Determine the type the argument will be passed as. This accommodates for
     // the corresponding code in Executor.cpp for handling calls to bitcasted
     // functions.
@@ -319,10 +343,18 @@ Function *ExternalDispatcherImpl::createDispatcher(Function *target,
     idx += ((!!argSize ? argSize : 64) + 63) / 64;
   }
 
-  auto dispatchTarget = module->getOrInsertFunction(target->getName(), FTy,
-                                                    target->getAttributes());
-  auto result = Builder.CreateCall(dispatchTarget,
-                                   llvm::ArrayRef<Value *>(args, args + i));
+  llvm::CallInst *result;
+  if (auto *func = dyn_cast<KFunction>(target)) {
+    auto dispatchTarget = module->getOrInsertFunction(
+        target->getName(), FTy, func->function->getAttributes());
+    result = Builder.CreateCall(dispatchTarget,
+                                llvm::ArrayRef<Value *>(args, args + i));
+  } else if (auto *asmValue = dyn_cast<KInlineAsm>(target)) {
+    result = Builder.CreateCall(asmValue->getInlineAsm(),
+                                llvm::ArrayRef<Value *>(args, args + i));
+  } else {
+    assert(0 && "Unhandled KCallable derived class");
+  }
   if (result->getType() != Type::getVoidTy(ctx)) {
     auto resp = Builder.CreateBitCast(
         argI64s, PointerType::getUnqual(result->getType()));
@@ -346,9 +378,9 @@ ExternalDispatcher::ExternalDispatcher(llvm::LLVMContext &ctx)
 
 ExternalDispatcher::~ExternalDispatcher() { delete impl; }
 
-bool ExternalDispatcher::executeCall(llvm::Function *function,
-                                     llvm::Instruction *i, uint64_t *args) {
-  return impl->executeCall(function, i, args);
+bool ExternalDispatcher::executeCall(KCallable *callable, llvm::Instruction *i,
+                                     uint64_t *args, int roundingMode) {
+  return impl->executeCall(callable, i, args, roundingMode);
 }
 
 void *ExternalDispatcher::resolveSymbol(const std::string &name) {
@@ -359,4 +391,4 @@ int ExternalDispatcher::getLastErrno() { return impl->getLastErrno(); }
 void ExternalDispatcher::setLastErrno(int newErrno) {
   impl->setLastErrno(newErrno);
 }
-}
+} // namespace klee

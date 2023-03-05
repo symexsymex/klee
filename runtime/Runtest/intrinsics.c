@@ -24,6 +24,7 @@
 
 static KTest *testData = 0;
 static unsigned testPosition = 0;
+static uintptr_t *addresses;
 
 static unsigned char rand_byte(void) {
   unsigned x = rand();
@@ -47,6 +48,28 @@ static void report_internal_error(const char *msg, ...) {
   } else {
     exit(1);
   }
+}
+
+void recursively_allocate(KTestObject *obj, size_t index, void *addr,
+                          int lazy) {
+  if (!lazy) {
+    memcpy(addr, obj->bytes, obj->numBytes);
+    addresses[index] = (uintptr_t)addr;
+  } else {
+    void *address = malloc(obj->numBytes);
+    memcpy(address, obj->bytes, obj->numBytes);
+    addresses[index] = (uintptr_t)address;
+  }
+  for (size_t i = 0; i < obj->numPointers; i++) {
+    if (!addresses[obj->pointers[i].index]) {
+      recursively_allocate(&testData->objects[obj->pointers[i].index],
+                           obj->pointers[i].index, 0, 1);
+    }
+    void *offset_addr = (void *)(addresses[index] + (obj->pointers[i].offset));
+    memcpy(offset_addr, &addresses[obj->pointers[i].index], sizeof(void *));
+    *((char *)offset_addr) += obj->pointers[i].indexOffset;
+  }
+  return;
 }
 
 void klee_make_symbolic(void *array, size_t nbytes, const char *name) {
@@ -86,11 +109,13 @@ void klee_make_symbolic(void *array, size_t nbytes, const char *name) {
     char *name = getenv("KTEST_FILE");
 
     if (!name) {
-      fprintf(stdout, "KLEE-RUNTIME: KTEST_FILE not set, please enter .ktest path: ");
+      fprintf(stdout,
+              "KLEE-RUNTIME: KTEST_FILE not set, please enter .ktest path: ");
       fflush(stdout);
       name = tmp;
       if (!fgets(tmp, sizeof tmp, stdin) || !strlen(tmp)) {
-        fprintf(stderr, "KLEE-RUNTIME: cannot replay, no KTEST_FILE or user input\n");
+        fprintf(stderr,
+                "KLEE-RUNTIME: cannot replay, no KTEST_FILE or user input\n");
         exit(1);
       }
       tmp[strlen(tmp) - 1] = '\0'; /* kill newline */
@@ -100,34 +125,29 @@ void klee_make_symbolic(void *array, size_t nbytes, const char *name) {
       fprintf(stderr, "KLEE-RUNTIME: unable to open .ktest file\n");
       exit(1);
     }
+    addresses = calloc(testData->numObjects, sizeof(uintptr_t));
   }
 
   for (;; ++testPosition) {
+    while (testPosition < testData->numObjects && addresses[testPosition]) {
+      testPosition++;
+    }
     if (testPosition >= testData->numObjects) {
       report_internal_error("out of inputs. Will use zero if continuing.");
       memset(array, 0, nbytes);
       break;
     } else {
       KTestObject *o = &testData->objects[testPosition];
-      if (strcmp("model_version", o->name) == 0 &&
-          strcmp("model_version", name) != 0) {
-        // Skip over this KTestObject because we've hit
-        // `model_version` which is from the POSIX runtime
-        // and the caller didn't ask for it.
-        continue;
-      }
       if (strcmp(name, o->name) != 0) {
         report_internal_error(
             "object name mismatch. Requesting \"%s\" but returning \"%s\"",
             name, o->name);
       }
-      memcpy(array, o->bytes, nbytes < o->numBytes ? nbytes : o->numBytes);
       if (nbytes != o->numBytes) {
         report_internal_error("object sizes differ. Expected %zu but got %u",
                               nbytes, o->numBytes);
-        if (o->numBytes < nbytes)
-          memset((char *)array + o->numBytes, 0, nbytes - o->numBytes);
       }
+      recursively_allocate(o, testPosition, array, 0);
       ++testPosition;
       break;
     }
@@ -181,6 +201,3 @@ void klee_abort() { abort(); }
 void klee_print_expr(const char *msg, ...) {}
 
 void klee_set_forking(unsigned enable) {}
-
-void klee_open_merge() {}
-void klee_close_merge() {}

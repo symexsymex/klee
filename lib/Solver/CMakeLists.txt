@@ -6,12 +6,13 @@
 # License. See LICENSE.TXT for details.
 #
 #===------------------------------------------------------------------------===#
-klee_add_component(kleaverSolver
+add_library(kleaverSolver
   AssignmentValidatingSolver.cpp
   CachingSolver.cpp
   CexCachingSolver.cpp
   ConstantDivision.cpp
   ConstructSolverChain.cpp
+  ConcretizingSolver.cpp
   CoreSolver.cpp
   DummySolver.cpp
   FastCexSolver.cpp
@@ -24,23 +25,31 @@ klee_add_component(kleaverSolver
   Solver.cpp
   SolverCmdLine.cpp
   SolverImpl.cpp
+  SolverUtil.cpp
   SolverStats.cpp
   STPBuilder.cpp
   STPSolver.cpp
   ValidatingSolver.cpp
   Z3Builder.cpp
+  Z3BitvectorBuilder.cpp
+  Z3CoreBuilder.cpp
+  Z3HashConfig.cpp
   Z3Solver.cpp
 )
 
-set(LLVM_COMPONENTS
-  support
-)
-klee_get_llvm_libs(LLVM_LIBS ${LLVM_COMPONENTS})
-target_link_libraries(kleaverSolver PUBLIC ${LLVM_LIBS})
-
+llvm_config(kleaverSolver "${USE_LLVM_SHARED}" support)
 target_link_libraries(kleaverSolver PRIVATE
   kleeBasic
   kleaverExpr
   kleeSupport
+  kleeModule
   ${KLEE_SOLVER_LIBRARIES})
+target_include_directories(kleaverSolver PRIVATE ${KLEE_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS} ${KLEE_SOLVER_INCLUDE_DIRS})
+target_compile_options(kleaverSolver PRIVATE ${KLEE_COMPONENT_CXX_FLAGS})
+target_compile_definitions(kleaverSolver PRIVATE ${KLEE_COMPONENT_CXX_DEFINES})
 
+
+install(TARGETS kleaverSolver
+        EXPORT run_klee
+        DESTINATION "${RUN_KLEE_LIB_DEST}"
+        )

@@ -31,8 +31,9 @@ cl::opt<bool>
 
 } // namespace
 
-PTree::PTree(ExecutionState *initialState)
-    : root(PTreeNodePtr(new PTreeNode(nullptr, initialState))) {
+PTree::PTree(ExecutionState *initialState, uint32_t treeID) {
+  id = treeID;
+  root = PTreeNodePtr(new PTreeNode(nullptr, initialState, id));
   initialState->ptreeNode = root.getPointer();
 }
 
@@ -42,14 +43,15 @@ void PTree::attach(PTreeNode *node, ExecutionState *leftState,
   assert(node == rightState->ptreeNode &&
          "Attach assumes the right state is the current state");
   node->state = nullptr;
-  node->left = PTreeNodePtr(new PTreeNode(node, leftState));
+  node->left = PTreeNodePtr(new PTreeNode(node, leftState, id));
   // The current node inherits the tag
   uint8_t currentNodeTag = root.getInt();
   if (node->parent)
     currentNodeTag = node->parent->left.getPointer() == node
                          ? node->parent->left.getInt()
                          : node->parent->right.getInt();
-  node->right = PTreeNodePtr(new PTreeNode(node, rightState), currentNodeTag);
+  node->right =
+      PTreeNodePtr(new PTreeNode(node, rightState, id), currentNodeTag);
 }
 
 void PTree::remove(PTreeNode *n) {
@@ -102,7 +104,7 @@ void PTree::dump(llvm::raw_ostream &os) {
   os << "\tcenter = \"true\";\n";
   os << "\tnode [style=\"filled\",width=.1,height=.1,fontname=\"Terminus\"]\n";
   os << "\tedge [arrowsize=.3]\n";
-  std::vector<const PTreeNode*> stack;
+  std::vector<const PTreeNode *> stack;
   stack.push_back(root.getPointer());
   while (!stack.empty()) {
     const PTreeNode *n = stack.back();
@@ -128,7 +130,8 @@ void PTree::dump(llvm::raw_ostream &os) {
   delete pp;
 }
 
-PTreeNode::PTreeNode(PTreeNode *parent, ExecutionState *state) : parent{parent}, state{state} {
+PTreeNode::PTreeNode(PTreeNode *parent, ExecutionState *state, uint32_t id)
+    : parent{parent}, state{state}, treeID{id} {
   state->ptreeNode = this;
   left = PTreeNodePtr(nullptr);
   right = PTreeNodePtr(nullptr);

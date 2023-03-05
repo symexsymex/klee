@@ -29,8 +29,9 @@ ReadExpr *ArrayExprHelper::hasOrderedReads(const ConcatExpr &ce) {
 
   // right now, all Reads are byte reads but some
   // transformations might change this
-  if (!base || base->getWidth() != Expr::Int8)
+  if (!base || base->getWidth() != Expr::Int8) {
     return nullptr;
+  }
 
   // Get stride expr in proper index width.
   Expr::Width idxWidth = base->index->getWidth();
@@ -54,45 +55,27 @@ ReadExpr *ArrayExprHelper::hasOrderedReads(const ConcatExpr &ce) {
   return cast<ReadExpr>(e.get());
 }
 
+void ArrayExprHelper::collectAlternatives(
+    const SelectExpr &se, std::vector<ref<Expr>> &alternatives) {
+  if (isa<SelectExpr>(se.trueExpr)) {
+    collectAlternatives(*cast<SelectExpr>(se.trueExpr), alternatives);
+  } else {
+    alternatives.push_back(se.trueExpr);
+  }
+  if (isa<SelectExpr>(se.falseExpr)) {
+    collectAlternatives(*cast<SelectExpr>(se.falseExpr), alternatives);
+  } else {
+    alternatives.push_back(se.falseExpr);
+  }
+}
+
 //--------------------------- INDEX-BASED OPTIMIZATION-----------------------//
 ExprVisitor::Action
 ConstantArrayExprVisitor::visitConcat(const ConcatExpr &ce) {
   ReadExpr *base = ArrayExprHelper::hasOrderedReads(ce);
-  if (base) {
-    // It is an interesting ReadExpr if it contains a concrete array
-    // that is read at a symbolic index
-    if (base->updates.root->isConstantArray() &&
-        !isa<ConstantExpr>(base->index)) {
-      for (const auto *un = base->updates.head.get(); un; un = un->next.get()) {
-        if (!isa<ConstantExpr>(un->index) || !isa<ConstantExpr>(un->value)) {
-          incompatible = true;
-          return Action::skipChildren();
-        }
-      }
-      IndexCompatibilityExprVisitor compatible;
-      compatible.visit(base->index);
-      if (compatible.isCompatible() &&
-          addedIndexes.find(base->index.get()->hash()) == addedIndexes.end()) {
-        if (arrays.find(base->updates.root) == arrays.end()) {
-          arrays.insert(
-              std::make_pair(base->updates.root, std::vector<ref<Expr> >()));
-        } else {
-          // Another possible index to resolve, currently unsupported
-          incompatible = true;
-          return Action::skipChildren();
-        }
-        arrays.find(base->updates.root)->second.push_back(base->index);
-        addedIndexes.insert(base->index.get()->hash());
-      } else if (compatible.hasInnerReads()) {
-        // This Read has an inner Read, we want to optimize the inner one
-        // to create a cascading effect during assignment evaluation
-        return Action::doChildren();
-      }
-      return Action::skipChildren();
-    }
-  }
-  return Action::doChildren();
+  return base ? visitRead(*base) : Action::doChildren();
 }
+
 ExprVisitor::Action ConstantArrayExprVisitor::visitRead(const ReadExpr &re) {
   // It is an interesting ReadExpr if it contains a concrete array
   // that is read at a symbolic index
@@ -105,18 +88,16 @@ ExprVisitor::Action ConstantArrayExprVisitor::visitRead(const ReadExpr &re) {
     }
     IndexCompatibilityExprVisitor compatible;
     compatible.visit(re.index);
-    if (compatible.isCompatible() &&
-        addedIndexes.find(re.index.get()->hash()) == addedIndexes.end()) {
-      if (arrays.find(re.updates.root) == arrays.end()) {
-        arrays.insert(
-            std::make_pair(re.updates.root, std::vector<ref<Expr> >()));
-      } else {
-        // Another possible index to resolve, currently unsupported
-        incompatible = true;
-        return Action::skipChildren();
+    if (compatible.isCompatible()) {
+      if (arrays.count(re.updates.root) > 0) {
+        const auto &indices = arrays[re.updates.root];
+        if (!indices.empty() && indices.front() != re.index) {
+          // Another possible index to resolve, currently unsupported
+          incompatible = true;
+          return Action::skipChildren();
+        }
       }
-      arrays.find(re.updates.root)->second.push_back(re.index);
-      addedIndexes.insert(re.index.get()->hash());
+      arrays[re.updates.root].push_back(re.index);
     } else if (compatible.hasInnerReads()) {
       // This Read has an inner Read, we want to optimize the inner one
       // to create a cascading effect during assignment evaluation

@@ -42,7 +42,7 @@ foreach (bc_architecture ${bc_architectures})
         elseif (bc_optimization STREQUAL "Release+Debug+Asserts")
             list(APPEND local_flags -O2 -g -D_DEBUG)
         elseif (bc_optimization STREQUAL "Debug")
-            list(APPEND local_flags -g -D_DEBUG -DNDEBUG)
+            list(APPEND local_flags -g -D_DEBUG -fpermissive)
         elseif (bc_optimization STREQUAL "Debug+Asserts")
             list(APPEND local_flags -g -D_DEBUG)
         else()
@@ -59,12 +59,11 @@ message(STATUS "LIB_BC_SUFFIX: ${LIB_BC_SUFFIX}")
 message(STATUS "KLEE_RUNTIME_DIRECTORY: ${KLEE_RUNTIME_DIRECTORY}")
 
 # Add additional setups if needed, e.g.
-# `list(APPEND LIB_BC_SUFFIX 64_MY_SPECIAL_CONFIG)`
+# `list(APPEND LIB_BC_SUFFIX MY_SPECIAL_CONFIG)`
 
-# Following define the specific flags: LIB_BC_FLAGS_*SUFFIX_FROM_ABOVE*, e.g.
-# ```set(LIB_BC_FLAGS_64_MY_SPECIAL_CONFIG
-#         -DSOME_DEFINE
-# )``
+# Following define the specific flags: LIB_BC_FLAGS_*SUFFIX_FROM_ABOVE*
+set(LIB_BC_FLAGS_64)
+set(LIB_BC_FLAGS_32 -m32)
 
 # Common for all library configurations
 # Since the runtime now contains fortified libc functions, it is
@@ -105,9 +104,17 @@ if (ENABLE_KLEE_EH_CXX)
 endif ()
 
 if (ENABLE_POSIX_RUNTIME)
-    list(APPEND RUNTIME_LIBRARIES RuntimePOSIX)
+    list(APPEND RUNTIME_LIBRARIES "RuntimePOSIX;RuntimeIO_C")
     add_subdirectory(POSIX)
 endif ()
+
+if (ENABLE_FP_RUNTIME)
+    list(APPEND RUNTIME_LIBRARIES RuntimeFp)
+    add_subdirectory(klee-fp)
+endif ()
+
+list(APPEND RUNTIME_LIBRARIES UBSan)
+add_subdirectory(Sanitizer)
 
 add_custom_target(BuildKLEERuntimes
         DEPENDS "${RUNTIME_LIBRARIES}"

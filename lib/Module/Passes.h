@@ -12,12 +12,16 @@
 
 #include "klee/Config/Version.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/ADT/Triple.h"
 #include "llvm/CodeGen/IntrinsicLowering.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
+DISABLE_WARNING_POP
 
 namespace llvm {
 class Function;
@@ -59,13 +63,14 @@ class IntrinsicCleanerPass : public llvm::ModulePass {
   static char ID;
   const llvm::DataLayout &DataLayout;
   llvm::IntrinsicLowering *IL;
+  bool WithFPRuntime;
 
   bool runOnBasicBlock(llvm::BasicBlock &b, llvm::Module &M);
 
 public:
-  IntrinsicCleanerPass(const llvm::DataLayout &TD)
+  IntrinsicCleanerPass(const llvm::DataLayout &TD, bool _WithFPRuntime)
       : llvm::ModulePass(ID), DataLayout(TD),
-        IL(new llvm::IntrinsicLowering(TD)) {}
+        IL(new llvm::IntrinsicLowering(TD)), WithFPRuntime(_WithFPRuntime) {}
   ~IntrinsicCleanerPass() { delete IL; }
 
   bool runOnModule(llvm::Module &M) override;
@@ -179,23 +184,12 @@ public:
 
 private:
   static const llvm::FunctionType *getFunctionType(const llvm::GlobalValue *gv);
-  static bool checkType(const llvm::GlobalValue *match, const llvm::GlobalValue *replacement);
-  static bool tryToReplace(llvm::GlobalValue *match, llvm::GlobalValue *replacement);
+  static bool checkType(const llvm::GlobalValue *match,
+                        const llvm::GlobalValue *replacement);
+  static bool tryToReplace(llvm::GlobalValue *match,
+                           llvm::GlobalValue *replacement);
   static bool isFunctionOrGlobalFunctionAlias(const llvm::GlobalValue *gv);
-
 };
-
-#ifdef USE_WORKAROUND_LLVM_PR39177
-/// WorkaroundLLVMPR39177Pass - Workaround for LLVM PR39177 within KLEE repo.
-/// For more information on this, please refer to the comments in
-/// cmake/workaround_llvm_pr39177.cmake
-class WorkaroundLLVMPR39177Pass : public llvm::ModulePass {
-public:
-  static char ID;
-  WorkaroundLLVMPR39177Pass() : llvm::ModulePass(ID) {}
-  bool runOnModule(llvm::Module &M) override;
-};
-#endif
 
 /// Instruments every function that contains a KLEE function call as nonopt
 class OptNonePass : public llvm::ModulePass {
@@ -203,6 +197,20 @@ public:
   static char ID;
   OptNonePass() : llvm::ModulePass(ID) {}
   bool runOnModule(llvm::Module &M) override;
+};
+
+class CallSplitter : public llvm::FunctionPass {
+public:
+  static char ID;
+  CallSplitter() : llvm::FunctionPass(ID) {}
+  bool runOnFunction(llvm::Function &F) override;
+};
+
+class ReturnSplitter : public llvm::FunctionPass {
+public:
+  static char ID;
+  ReturnSplitter() : llvm::FunctionPass(ID) {}
+  bool runOnFunction(llvm::Function &F) override;
 };
 } // namespace klee
 

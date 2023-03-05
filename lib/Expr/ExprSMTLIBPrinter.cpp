@@ -9,11 +9,17 @@
 
 #include "klee/Expr/ExprSMTLIBPrinter.h"
 #include "klee/Support/Casting.h"
+#include "klee/Support/ErrorHandling.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
+DISABLE_WARNING_POP
 
 #include <stack>
+#include <string>
 
 namespace ExprSMTLIBOptions {
 // Command line options
@@ -62,9 +68,7 @@ ExprSMTLIBPrinter::ExprSMTLIBPrinter()
   setAbbreviationMode(ExprSMTLIBOptions::abbreviationMode);
 }
 
-ExprSMTLIBPrinter::~ExprSMTLIBPrinter() {
-  delete p;
-}
+ExprSMTLIBPrinter::~ExprSMTLIBPrinter() { delete p; }
 
 void ExprSMTLIBPrinter::setOutput(llvm::raw_ostream &output) {
   o = &output;
@@ -435,15 +439,15 @@ const char *ExprSMTLIBPrinter::getSMTLIBKeyword(const ref<Expr> &e) {
   case Expr::SRem:
     return "bvsrem";
 
-  /* And, Xor, Not and Or are not handled here because there different versions
-   * for different sorts. See printLogicalOrBitVectorExpr()
-   */
+    /* And, Xor, Not and Or are not handled here because there different
+     * versions for different sorts. See printLogicalOrBitVectorExpr()
+     */
 
   case Expr::Shl:
     return "bvshl";
   case Expr::LShr:
     return "bvlshr";
-  // AShr is not supported here. See printAShrExpr()
+    // AShr is not supported here. See printAShrExpr()
 
   case Expr::Eq:
     return "=";
@@ -497,13 +501,13 @@ void ExprSMTLIBPrinter::printUpdatesAndArray(const UpdateNode *un,
     *p << ")";
   } else {
     // The base case of the recursion
-    *p << root->name;
+    *p << root->getIdentifier();
   }
 }
 
 void ExprSMTLIBPrinter::scanAll() {
   // perform scan of all expressions
-  for (const auto &constraint : query->constraints)
+  for (const auto &constraint : query->constraints.cs())
     scan(constraint);
 
   // Scan the query too
@@ -553,11 +557,11 @@ namespace {
 
 struct ArrayPtrsByName {
   bool operator()(const Array *a1, const Array *a2) const {
-    return a1->name < a2->name;
+    return a1->id < a2->id;
   }
 };
 
-}
+} // namespace
 
 void ExprSMTLIBPrinter::printArrayDeclarations() {
   // Assume scan() has been called
@@ -569,10 +573,13 @@ void ExprSMTLIBPrinter::printArrayDeclarations() {
   std::sort(sortedArrays.begin(), sortedArrays.end(), ArrayPtrsByName());
   for (std::vector<const Array *>::iterator it = sortedArrays.begin();
        it != sortedArrays.end(); it++) {
-    *o << "(declare-fun " << (*it)->name << " () "
-                                            "(Array (_ BitVec "
-       << (*it)->getDomain() << ") "
-                                "(_ BitVec " << (*it)->getRange() << ") ) )"
+    *o << "(declare-fun " << (*it)->getIdentifier()
+       << " () "
+          "(Array (_ BitVec "
+       << (*it)->getDomain()
+       << ") "
+          "(_ BitVec "
+       << (*it)->getRange() << ") ) )"
        << "\n";
   }
 
@@ -587,24 +594,33 @@ void ExprSMTLIBPrinter::printArrayDeclarations() {
     for (std::vector<const Array *>::iterator it = sortedArrays.begin();
          it != sortedArrays.end(); it++) {
       array = *it;
-      int byteIndex = 0;
       if (array->isConstantArray()) {
         /*loop over elements in the array and generate an assert statement
           for each one
          */
-        for (std::vector<ref<ConstantExpr> >::const_iterator
-                 ce = array->constantValues.begin();
-             ce != array->constantValues.end(); ce++, byteIndex++) {
+        uint64_t size =
+            cast<ConstantExpr>(
+                query->constraints.concretization().evaluate(array->size))
+                ->getZExtValue();
+        for (uint64_t byteIndex = 0; byteIndex < size; ++byteIndex) {
           *p << "(assert (";
           p->pushIndent();
           *p << "= ";
           p->pushIndent();
           printSeperator();
 
-          *p << "(select " << array->name << " (_ bv" << byteIndex << " "
-             << array->getDomain() << ") )";
+          *p << "(select " << array->getIdentifier() << " (_ bv" << byteIndex
+             << " " << array->getDomain() << ") )";
           printSeperator();
-          printConstant((*ce));
+
+          if (ref<SymbolicSizeConstantSource> symbolicSizeConstantSource =
+                  dyn_cast<SymbolicSizeConstantSource>(array->source)) {
+            printConstant(ConstantExpr::create(
+                symbolicSizeConstantSource->defaultValue, array->getRange()));
+          } else if (ref<ConstantSource> constantSource =
+                         cast<ConstantSource>(array->source)) {
+            printConstant(constantSource->constantValues[byteIndex]);
+          }
 
           p->popIndent();
           printSeperator();
@@ -626,7 +642,7 @@ void ExprSMTLIBPrinter::printHumanReadableQuery() {
 
   if (abbrMode != ABBR_LET) {
     // Generate assert statements for each constraint
-    for (const auto &constraint : query->constraints)
+    for (const auto &constraint : query->constraints.cs())
       printAssert(constraint);
 
     *o << "; QueryExpr\n";
@@ -647,15 +663,14 @@ void ExprSMTLIBPrinter::printMachineReadableQuery() {
   printQueryInSingleAssert();
 }
 
-
 void ExprSMTLIBPrinter::printQueryInSingleAssert() {
   // We negate the Query Expr because in KLEE queries are solved
   // in terms of validity, but SMT-LIB works in terms of satisfiability
   ref<Expr> queryAssert = Expr::createIsZero(query->expr);
 
   // Print constraints inside the main query to reuse the Expr bindings
-  for (std::vector<ref<Expr> >::const_iterator i = query->constraints.begin(),
-                                               e = query->constraints.end();
+  for (std::set<ref<Expr>>::const_iterator i = query->constraints.cs().begin(),
+                                           e = query->constraints.cs().end();
        i != e; ++i) {
     queryAssert = AndExpr::create(queryAssert, *i);
   }
@@ -681,9 +696,19 @@ void ExprSMTLIBPrinter::printAction() {
          it != arraysToCallGetValueOn->end(); it++) {
       theArray = *it;
       // Loop over the array indices
-      for (unsigned int index = 0; index < theArray->size; ++index) {
-        *o << "(get-value ( (select " << (**it).name << " (_ bv" << index << " "
-           << theArray->getDomain() << ") ) ) )\n";
+      ref<ConstantExpr> arrayConstantSize = dyn_cast<ConstantExpr>(
+          query->constraints.concretization().evaluate(theArray->size));
+      if (!arrayConstantSize) {
+        klee_warning(
+            "Query for %s can not  be printed as it has non-conretized "
+            "symbolic size!",
+            theArray->getIdentifier().c_str());
+        continue;
+      }
+      for (unsigned int index = 0; index < arrayConstantSize->getZExtValue();
+           ++index) {
+        *o << "(get-value ( (select " << (**it).getIdentifier() << " (_ bv"
+           << index << " " << theArray->getDomain() << ") ) ) )\n";
       }
     }
   }
@@ -719,7 +744,7 @@ void ExprSMTLIBPrinter::scan(const ref<Expr> &e) {
   } else {
     // Add the expression to the binding map. The semantics of std::map::insert
     // are such that it will not be inserted twice.
-    bindings.insert(std::make_pair(e, bindings.size()+1));
+    bindings.insert(std::make_pair(e, bindings.size() + 1));
   }
 }
 
@@ -728,7 +753,7 @@ void ExprSMTLIBPrinter::scanBindingExprDeps() {
     return;
 
   // Mutual dependency storage
-  typedef std::map<const ref<Expr>, std::set<ref<Expr> > > ExprDepMap;
+  typedef std::map<const ref<Expr>, std::set<ref<Expr>>> ExprDepMap;
 
   // A map from binding Expr (need abbreviating) "e" to the set of binding Expr
   // that are sub expressions of "e" (i.e. "e" uses these sub expressions).
@@ -747,12 +772,12 @@ void ExprSMTLIBPrinter::scanBindingExprDeps() {
   ExprDepMap subExprOfMap;
 
   // Working queue holding expressions with no dependencies
-  std::vector<ref<Expr> > nonDepBindings;
+  std::vector<ref<Expr>> nonDepBindings;
 
   // Iterate over bindings and collect dependencies
-  for (BindingMap::const_iterator it = bindings.begin();
-       it != bindings.end(); ++it) {
-    std::stack<ref<Expr> > childQueue;
+  for (BindingMap::const_iterator it = bindings.begin(); it != bindings.end();
+       ++it) {
+    std::stack<ref<Expr>> childQueue;
     childQueue.push(it->first);
     // Non-recursive expression parsing
     while (childQueue.size()) {
@@ -783,17 +808,17 @@ void ExprSMTLIBPrinter::scanBindingExprDeps() {
   // nonDepBindings always holds expressions with no dependencies
   while (nonDepBindings.size()) {
     BindingMap levelExprs;
-    std::vector<ref<Expr> > tmp(nonDepBindings);
+    std::vector<ref<Expr>> tmp(nonDepBindings);
     nonDepBindings.clear();
-    for (std::vector<ref<Expr> >::const_iterator nonDepExprIt = tmp.begin();
+    for (std::vector<ref<Expr>>::const_iterator nonDepExprIt = tmp.begin();
          nonDepExprIt != tmp.end(); ++nonDepExprIt) {
       // Save to the level expression bindings
       levelExprs.insert(std::make_pair(*nonDepExprIt, counter++));
       // Who is dependent on me?
       ExprDepMap::iterator depsIt = subExprOfMap.find(*nonDepExprIt);
       if (depsIt != subExprOfMap.end()) {
-        for (std::set<ref<Expr> >::iterator exprIt = depsIt->second.begin();
-             exprIt != depsIt->second.end(); ) {
+        for (std::set<ref<Expr>>::iterator exprIt = depsIt->second.begin();
+             exprIt != depsIt->second.end();) {
           // Erase dependency
           ExprDepMap::iterator subExprIt = usesSubExprMap.find(*exprIt);
           assert(subExprIt != usesSubExprMap.end());
@@ -897,7 +922,7 @@ void ExprSMTLIBPrinter::printAssert(const ref<Expr> &e) {
       printSeperator();
 
       // Add nested let expressions (if any)
-      if (i < orderedBindings.size()-1) {
+      if (i < orderedBindings.size() - 1) {
         *p << "(let";
         p->pushIndent();
         printSeperator();
@@ -1130,8 +1155,8 @@ bool ExprSMTLIBPrinter::setSMTLIBboolOption(SMTLIBboolOptions option,
   }
 }
 
-void
-ExprSMTLIBPrinter::setArrayValuesToGet(const std::vector<const Array *> &a) {
+void ExprSMTLIBPrinter::setArrayValuesToGet(
+    const std::vector<const Array *> &a) {
   arraysToCallGetValueOn = &a;
 
   // This option must be set in order to use the SMTLIBv2 command (get-value ()
@@ -1163,4 +1188,4 @@ const char *ExprSMTLIBPrinter::getSMTLIBOptionString(
     return "unknown-option";
   }
 }
-}
+} // namespace klee

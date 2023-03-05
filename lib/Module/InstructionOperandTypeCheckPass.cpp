@@ -9,7 +9,12 @@
 #include "Passes.h"
 #include "klee/Config/Version.h"
 #include "klee/Support/ErrorHandling.h"
+
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/Support/raw_ostream.h"
+DISABLE_WARNING_POP
 
 using namespace llvm;
 
@@ -94,7 +99,7 @@ bool checkInstruction(const Instruction *i) {
     // scalarizer pass might not remove these. This could be selecting which
     // vector operand to feed to another instruction. The Executor can handle
     // this so case so this is not a problem
-    return checkOperandTypeIsScalarInt(i, 0) &
+    return checkOperandTypeIsScalarInt(i, 0) &&
            checkOperandsHaveSameType(i, 1, 2);
   }
   // Integer arithmetic, logical and shifting
@@ -111,12 +116,12 @@ bool checkInstruction(const Instruction *i) {
   case Instruction::Shl:
   case Instruction::LShr:
   case Instruction::AShr: {
-    return checkOperandTypeIsScalarInt(i, 0) &
+    return checkOperandTypeIsScalarInt(i, 0) &&
            checkOperandTypeIsScalarInt(i, 1);
   }
   // Integer comparison
   case Instruction::ICmp: {
-    return checkOperandTypeIsScalarIntOrPointer(i, 0) &
+    return checkOperandTypeIsScalarIntOrPointer(i, 0) &&
            checkOperandTypeIsScalarIntOrPointer(i, 1);
   }
   // Integer Conversion
@@ -136,7 +141,7 @@ bool checkInstruction(const Instruction *i) {
   case Instruction::FMul:
   case Instruction::FDiv:
   case Instruction::FRem: {
-    return checkOperandTypeIsScalarFloat(i, 0) &
+    return checkOperandTypeIsScalarFloat(i, 0) &&
            checkOperandTypeIsScalarFloat(i, 1);
   }
   // Floating point conversion
@@ -152,7 +157,7 @@ bool checkInstruction(const Instruction *i) {
   }
   // Floating point comparison
   case Instruction::FCmp: {
-    return checkOperandTypeIsScalarFloat(i, 0) &
+    return checkOperandTypeIsScalarFloat(i, 0) &&
            checkOperandTypeIsScalarFloat(i, 1);
   }
   default:
@@ -160,7 +165,7 @@ bool checkInstruction(const Instruction *i) {
     return true;
   }
 }
-}
+} // namespace
 
 namespace klee {
 
@@ -180,4 +185,4 @@ bool InstructionOperandTypeCheckPass::runOnModule(Module &M) {
 
   return false;
 }
-}
+} // namespace klee

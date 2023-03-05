@@ -20,11 +20,17 @@
 
 #ifdef ENABLE_METASMT
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
+#include "llvm/ADT/iterator_range.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ErrorHandling.h"
+DISABLE_WARNING_POP
 
+#include <metaSMT/frontend/Array.hpp>
 #include <metaSMT/frontend/Logic.hpp>
 #include <metaSMT/frontend/QF_BV.hpp>
-#include <metaSMT/frontend/Array.hpp>
 
 using namespace metaSMT;
 using namespace metaSMT::logic::QF_BV;
@@ -40,10 +46,12 @@ llvm::cl::opt<bool> UseConstructHashMetaSMT(
 
 namespace klee {
 
-typedef metaSMT::logic::Predicate<proto::terminal<
-    metaSMT::logic::tag::true_tag>::type> const MetaSMTConstTrue;
-typedef metaSMT::logic::Predicate<proto::terminal<
-    metaSMT::logic::tag::false_tag>::type> const MetaSMTConstFalse;
+typedef metaSMT::logic::Predicate<
+    proto::terminal<metaSMT::logic::tag::true_tag>::type> const
+    MetaSMTConstTrue;
+typedef metaSMT::logic::Predicate<
+    proto::terminal<metaSMT::logic::tag::false_tag>::type> const
+    MetaSMTConstFalse;
 typedef metaSMT::logic::Array::array MetaSMTArray;
 
 template <typename SolverContext> class MetaSMTBuilder;
@@ -129,11 +137,11 @@ public:
   MetaSMTArray buildArray(unsigned elem_width, unsigned index_width);
 
 private:
-  typedef ExprHashMap<std::pair<typename SolverContext::result_type, unsigned> >
+  typedef ExprHashMap<std::pair<typename SolverContext::result_type, unsigned>>
       MetaSMTExprHashMap;
   typedef typename MetaSMTExprHashMap::iterator MetaSMTExprHashMapIter;
-  typedef typename MetaSMTExprHashMap::const_iterator
-      MetaSMTExprHashMapConstIter;
+  typedef
+      typename MetaSMTExprHashMap::const_iterator MetaSMTExprHashMapConstIter;
 
   SolverContext &_solver;
   bool _optimizeDivides;
@@ -172,22 +180,32 @@ template <typename SolverContext>
 typename SolverContext::result_type
 MetaSMTBuilder<SolverContext>::getArrayForUpdate(const Array *root,
                                                  const UpdateNode *un) {
-
-  if (!un) {
-    return (getInitialArray(root));
-  } else {
-    typename SolverContext::result_type un_expr;
-    bool hashed = _arr_hash.lookupUpdateNodeExpr(un, un_expr);
-
-    if (!hashed) {
-      un_expr = evaluate(_solver,
-                         metaSMT::logic::Array::store(
-                             getArrayForUpdate(root, un->next.get()),
-                             construct(un->index, 0), construct(un->value, 0)));
-      _arr_hash.hashUpdateNodeExpr(un, un_expr);
-    }
-    return (un_expr);
+  // Iterate over the update nodes, until we find a cached version of the node,
+  // or no more update nodes remain
+  typename SolverContext::result_type un_expr;
+  std::vector<const UpdateNode *> update_nodes;
+  for (; un && !_arr_hash.lookupUpdateNodeExpr(un, un_expr);
+       un = un->next.get()) {
+    update_nodes.push_back(un);
   }
+  if (!un) {
+    un_expr = getInitialArray(root);
+  }
+  // `un_expr` now holds an expression for the array - either from cache or by
+  // virtue of being the initial array expression
+
+  // Create and cache solver expressions based on the update nodes starting from
+  // the oldest
+  for (const auto &un :
+       llvm::make_range(update_nodes.crbegin(), update_nodes.crend())) {
+    un_expr = evaluate(
+        _solver, metaSMT::logic::Array::store(un_expr, construct(un->index, 0),
+                                              construct(un->value, 0)));
+
+    _arr_hash.hashUpdateNodeExpr(un, un_expr);
+  }
+
+  return un_expr;
 }
 
 template <typename SolverContext>
@@ -198,18 +216,25 @@ MetaSMTBuilder<SolverContext>::getInitialArray(const Array *root) {
   bool hashed = _arr_hash.lookupArrayExpr(root, array_expr);
 
   if (!hashed) {
+    if (isa<SymbolicSizeConstantSource>(root->source)) {
+      llvm::report_fatal_error("MetaSMT does not support constant arrays or "
+                               "quantifiers to instantiate "
+                               "constant array of symbolic size!");
+    }
 
     array_expr =
         evaluate(_solver, buildArray(root->getRange(), root->getDomain()));
 
-    if (root->isConstantArray()) {
-      for (unsigned i = 0, e = root->size; i != e; ++i) {
+    if (ref<ConstantSource> constantSource =
+            dyn_cast<ConstantSource>(root->source)) {
+      uint64_t constantSize = cast<ConstantExpr>(root->size)->getZExtValue();
+      for (unsigned i = 0, e = constantSize; i != e; ++i) {
         typename SolverContext::result_type tmp = evaluate(
             _solver,
             metaSMT::logic::Array::store(
                 array_expr,
                 construct(ConstantExpr::alloc(i, root->getDomain()), 0),
-                construct(root->constantValues[i], 0)));
+                construct(constantSource->constantValues[i], 0)));
         array_expr = tmp;
       }
     }
@@ -309,10 +334,10 @@ MetaSMTBuilder<SolverContext>::constructAShrByConstant(
     res = bvZero(width);
   } else {
     res = evaluate(
-        _solver,
-        metaSMT::logic::Ite(isSigned, concat(bvMinusOne(shift),
-                                             bvExtract(expr, width - 1, shift)),
-                            bvRightShift(expr, width, shift)));
+        _solver, metaSMT::logic::Ite(isSigned,
+                                     concat(bvMinusOne(shift),
+                                            bvExtract(expr, width - 1, shift)),
+                                     bvRightShift(expr, width, shift)));
   }
 
   return (res);
@@ -649,10 +674,11 @@ MetaSMTBuilder<SolverContext>::constructActual(ref<Expr> e, int *width_out) {
       while (tmp->getWidth() > 64) {
         tmp = tmp->Extract(64, tmp->getWidth() - 64);
         unsigned min_width = std::min(64U, tmp->getWidth());
-        res = evaluate(_solver,
-                       concat(bvConst64(min_width, tmp->Extract(0, min_width)
-                                                       ->getZExtValue()),
-                              res));
+        res = evaluate(
+            _solver,
+            concat(bvConst64(min_width,
+                             tmp->Extract(0, min_width)->getZExtValue()),
+                   res));
       }
     }
     break;

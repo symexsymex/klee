@@ -9,11 +9,15 @@
 #include "QueryLoggingSolver.h"
 
 #include "klee/Config/config.h"
-#include "klee/Support/OptionCategories.h"
+#include "klee/Expr/Constraints.h"
+#include "klee/Expr/ExprUtil.h"
 #include "klee/Statistics/Statistics.h"
 #include "klee/Support/ErrorHandling.h"
 #include "klee/Support/FileHandling.h"
+#include "klee/Support/OptionCategories.h"
 #include "klee/System/Time.h"
+
+#include <utility>
 
 namespace {
 llvm::cl::opt<bool> DumpPartialQueryiesEarly(
@@ -29,13 +33,14 @@ llvm::cl::opt<bool> CreateCompressedQueryLog(
 #endif
 } // namespace
 
-QueryLoggingSolver::QueryLoggingSolver(Solver *_solver, std::string path,
+QueryLoggingSolver::QueryLoggingSolver(std::unique_ptr<Solver> solver,
+                                       std::string path,
                                        const std::string &commentSign,
                                        time::Span queryTimeToLog,
                                        bool logTimedOut)
-    : solver(_solver), BufferString(""), logBuffer(BufferString), queryCount(0),
-      minQueryTimeToLog(queryTimeToLog), logTimedOutQueries(logTimedOut),
-      queryCommentSign(commentSign) {
+    : solver(std::move(solver)), BufferString(""), logBuffer(BufferString),
+      queryCount(0), minQueryTimeToLog(queryTimeToLog),
+      logTimedOutQueries(logTimedOut), queryCommentSign(commentSign) {
   std::string error;
 #ifdef HAVE_ZLIB_H
   if (!CreateCompressedQueryLog) {
@@ -50,11 +55,7 @@ QueryLoggingSolver::QueryLoggingSolver(Solver *_solver, std::string path,
   if (!os) {
     klee_error("Could not open file %s : %s", path.c_str(), error.c_str());
   }
-  assert(0 != solver);
-}
-
-QueryLoggingSolver::~QueryLoggingSolver() {
-  delete solver;
+  assert(this->solver);
 }
 
 void QueryLoggingSolver::flushBufferConditionally(bool writeToFile) {
@@ -93,7 +94,8 @@ void QueryLoggingSolver::finishQuery(bool success) {
   if (false == success) {
     logBuffer << queryCommentSign << "   Failure reason: "
               << SolverImpl::getOperationStatusString(
-                     solver->impl->getOperationStatusCode()) << "\n";
+                     solver->impl->getOperationStatusCode())
+              << "\n";
   }
 }
 
@@ -101,10 +103,10 @@ void QueryLoggingSolver::flushBuffer() {
   // we either do not limit logging queries
   // or the query time is larger than threshold
   // or we log a timed out query
-  bool writeToFile = (!minQueryTimeToLog)
-      || (lastQueryDuration > minQueryTimeToLog)
-      || (logTimedOutQueries &&
-         (SOLVER_RUN_STATUS_TIMEOUT == solver->impl->getOperationStatusCode()));
+  bool writeToFile =
+      (!minQueryTimeToLog) || (lastQueryDuration > minQueryTimeToLog) ||
+      (logTimedOutQueries &&
+       (SOLVER_RUN_STATUS_TIMEOUT == solver->impl->getOperationStatusCode()));
 
   flushBufferConditionally(writeToFile);
 }
@@ -128,7 +130,7 @@ bool QueryLoggingSolver::computeTruth(const Query &query, bool &isValid) {
 }
 
 bool QueryLoggingSolver::computeValidity(const Query &query,
-                                         Solver::Validity &result) {
+                                         PartialValidity &result) {
   startQuery(query, "Validity");
 
   bool success = solver->impl->computeValidity(query, result);
@@ -136,7 +138,8 @@ bool QueryLoggingSolver::computeValidity(const Query &query,
   finishQuery(success);
 
   if (success) {
-    logBuffer << queryCommentSign << "   Validity: " << result << "\n";
+    logBuffer << queryCommentSign << "   Validity: " << pv_to_str(result)
+              << "\n";
   }
   logBuffer << "\n";
 
@@ -165,11 +168,20 @@ bool QueryLoggingSolver::computeValue(const Query &query, ref<Expr> &result) {
 
 bool QueryLoggingSolver::computeInitialValues(
     const Query &query, const std::vector<const Array *> &objects,
-    std::vector<std::vector<unsigned char> > &values, bool &hasSolution) {
+    std::vector<SparseStorage<unsigned char>> &values, bool &hasSolution) {
   startQuery(query, "InitialValues", 0, &objects);
 
-  bool success =
-      solver->impl->computeInitialValues(query, objects, values, hasSolution);
+  ExprHashSet expressions;
+  expressions.insert(query.constraints.cs().begin(),
+                     query.constraints.cs().end());
+  expressions.insert(query.expr);
+
+  std::vector<const Array *> allObjects;
+  findSymbolicObjects(expressions.begin(), expressions.end(), allObjects);
+  std::vector<SparseStorage<unsigned char>> allValues;
+
+  bool success = solver->impl->computeInitialValues(query, allObjects,
+                                                    allValues, hasSolution);
 
   finishQuery(success);
 
@@ -177,20 +189,31 @@ bool QueryLoggingSolver::computeInitialValues(
     logBuffer << queryCommentSign
               << "   Solvable: " << (hasSolution ? "true" : "false") << "\n";
     if (hasSolution) {
-      std::vector<std::vector<unsigned char> >::iterator values_it =
+      ref<InvalidResponse> invalidResponse =
+          new InvalidResponse(allObjects, allValues);
+      success = invalidResponse->tryGetInitialValuesFor(objects, values);
+      assert(success);
+      Assignment allSolutionAssignment(allObjects, allValues, true);
+      std::vector<SparseStorage<unsigned char>>::iterator values_it =
           values.begin();
 
+      Assignment solutionAssignment(objects, values, true);
       for (std::vector<const Array *>::const_iterator i = objects.begin(),
                                                       e = objects.end();
            i != e; ++i, ++values_it) {
         const Array *array = *i;
-        std::vector<unsigned char> &data = *values_it;
-        logBuffer << queryCommentSign << "     " << array->name << " = [";
+        SparseStorage<unsigned char> &data = *values_it;
+        logBuffer << queryCommentSign << "     " << array->getIdentifier()
+                  << " = [";
+        ref<ConstantExpr> arrayConstantSize =
+            dyn_cast<ConstantExpr>(allSolutionAssignment.evaluate(array->size));
+        assert(arrayConstantSize &&
+               "Array of symbolic size had not receive value for size!");
 
-        for (unsigned j = 0; j < array->size; j++) {
-          logBuffer << (int)data[j];
+        for (unsigned j = 0; j < arrayConstantSize->getZExtValue(); j++) {
+          logBuffer << (int)data.load(j);
 
-          if (j + 1 < array->size) {
+          if (j + 1 < arrayConstantSize->getZExtValue()) {
             logBuffer << ",";
           }
         }
@@ -198,6 +221,89 @@ bool QueryLoggingSolver::computeInitialValues(
       }
     }
   }
+  logBuffer << "\n";
+
+  flushBuffer();
+
+  return success;
+}
+
+bool QueryLoggingSolver::check(const Query &query,
+                               ref<SolverResponse> &result) {
+  startQuery(query, "Check");
+
+  bool success = solver->impl->check(query, result);
+
+  finishQuery(success);
+
+  if (success) {
+    bool hasSolution = isa<InvalidResponse>(result);
+    logBuffer << queryCommentSign
+              << "   Solvable: " << (hasSolution ? "true" : "false") << "\n";
+    if (hasSolution) {
+      std::map<const Array *, SparseStorage<unsigned char>> initialValues;
+      result->tryGetInitialValues(initialValues);
+      Assignment solutionAssignment(initialValues, true);
+
+      for (std::map<const Array *, SparseStorage<unsigned char>>::const_iterator
+               i = initialValues.begin(),
+               e = initialValues.end();
+           i != e; ++i) {
+        const Array *array = i->first;
+        const SparseStorage<unsigned char> &data = i->second;
+        logBuffer << queryCommentSign << "     " << array->getIdentifier()
+                  << " = [";
+        ref<ConstantExpr> arrayConstantSize =
+            dyn_cast<ConstantExpr>(solutionAssignment.evaluate(array->size));
+        assert(arrayConstantSize &&
+               "Array of symbolic size had not receive value for size!");
+        for (unsigned j = 0; j < arrayConstantSize->getZExtValue(); j++) {
+          logBuffer << (int)data.load(j);
+
+          if (j + 1 < arrayConstantSize->getZExtValue()) {
+            logBuffer << ",";
+          }
+        }
+        logBuffer << "]\n";
+      }
+    } else {
+      ValidityCore validityCore;
+      result->tryGetValidityCore(validityCore);
+      logBuffer << queryCommentSign << "   ValidityCore:\n";
+
+      printQuery(Query(ConstraintSet(validityCore.constraints, {}, {true}),
+                       validityCore.expr));
+    }
+  }
+  logBuffer << "\n";
+
+  flushBuffer();
+
+  return success;
+}
+
+bool QueryLoggingSolver::computeValidityCore(const Query &query,
+                                             ValidityCore &validityCore,
+                                             bool &isValid) {
+  startQuery(query, "ValidityCore");
+
+  bool success =
+      solver->impl->computeValidityCore(query, validityCore, isValid);
+
+  finishQuery(success);
+
+  if (success) {
+    logBuffer << queryCommentSign
+              << "   Is Valid: " << (isValid ? "true" : "false") << "\n";
+  }
+
+  if (isValid) {
+    logBuffer << queryCommentSign << "   ValidityCore:\n";
+
+    printQuery(Query(ConstraintSet(validityCore.constraints, {}, {true}),
+                     validityCore.expr));
+  }
+
   logBuffer << "\n";
 
   flushBuffer();

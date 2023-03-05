@@ -1,4 +1,4 @@
-//===-- KTest.h --------------------------------------------------*- C++ -*-===//
+//===-- KTest.h ------------------------------------------------*- C++ -*-===//
 //
 //                     The KLEE Symbolic Virtual Machine
 //
@@ -10,49 +10,60 @@
 #ifndef KLEE_KTEST_H
 #define KLEE_KTEST_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-  typedef struct KTestObject KTestObject;
-  struct KTestObject {
-    char *name;
-    unsigned numBytes;
-    unsigned char *bytes;
-  };
-  
-  typedef struct KTest KTest;
-  struct KTest {
-    /* file format version */
-    unsigned version; 
-    
-    unsigned numArgs;
-    char **args;
+typedef struct Pointer Pointer;
+struct Pointer {
+  unsigned offset;
+  unsigned index;
+  unsigned indexOffset;
+};
 
-    unsigned symArgvs;
-    unsigned symArgvLen;
+typedef struct KTestObject KTestObject;
+struct KTestObject {
+  char *name;
+  uint64_t address; // As a heuristic for now
+  unsigned numBytes;
+  unsigned char *bytes;
+  unsigned numPointers;
+  Pointer *pointers;
+};
 
-    unsigned numObjects;
-    KTestObject *objects;
-  };
+typedef struct KTest KTest;
+struct KTest {
+  /* file format version */
+  unsigned version;
 
-  
-  /* returns the current .ktest file format version */
-  unsigned kTest_getCurrentVersion();
-  
-  /* return true iff file at path matches KTest header */
-  int   kTest_isKTestFile(const char *path);
+  unsigned numArgs;
+  char **args;
 
-  /* returns NULL on (unspecified) error */
-  KTest* kTest_fromFile(const char *path);
+  unsigned symArgvs;
+  unsigned symArgvLen;
 
-  /* returns 1 on success, 0 on (unspecified) error */
-  int   kTest_toFile(KTest *, const char *path);
-  
-  /* returns total number of object bytes */
-  unsigned kTest_numBytes(KTest *);
+  unsigned numObjects;
+  KTestObject *objects;
+};
 
-  void  kTest_free(KTest *);
+/* returns the current .ktest file format version */
+unsigned kTest_getCurrentVersion();
+
+/* return true iff file at path matches KTest header */
+int kTest_isKTestFile(const char *path);
+
+/* returns NULL on (unspecified) error */
+KTest *kTest_fromFile(const char *path);
+
+/* returns 1 on success, 0 on (unspecified) error */
+int kTest_toFile(const KTest *, const char *path);
+
+/* returns total number of object bytes */
+unsigned kTest_numBytes(KTest *);
+
+void kTest_free(KTest *);
 
 #ifdef __cplusplus
 }

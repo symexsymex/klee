@@ -19,7 +19,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   int x = 54, y = 55;
   klee_make_symbolic(&x, sizeof(x), "x");
   klee_make_symbolic(&y, sizeof(y), "y");
@@ -29,11 +29,11 @@ int main(int argc, char** argv) {
     if (y == 0) {
       klee_assume(x == 0);
       x++;
-      // It's fine if the prefered value cannot be used
+      // It's fine if the preferred value cannot be used
       // CHECK_3: x=1, y=0
     } else {
       printf("x is allowed to be 33\n");
-      // The prefered value should be used if it can be
+      // The preferred value should be used if it can be
       // CHECK_2: x=33
     }
   } else {

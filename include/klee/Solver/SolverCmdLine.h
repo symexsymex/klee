@@ -16,9 +16,13 @@
 #define KLEE_SOLVERCMDLINE_H
 
 #include "klee/Config/config.h"
+#include "klee/Support/CompilerWarning.h"
 
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/CommandLine.h"
+DISABLE_WARNING_POP
 
 namespace klee {
 
@@ -27,6 +31,8 @@ extern llvm::cl::opt<bool> UseFastCexSolver;
 extern llvm::cl::opt<bool> UseCexCache;
 
 extern llvm::cl::opt<bool> UseBranchCache;
+
+extern llvm::cl::opt<bool> UseConcretizingSolver;
 
 extern llvm::cl::opt<bool> UseIndependentSolver;
 
@@ -65,6 +71,10 @@ enum CoreSolverType {
 extern llvm::cl::opt<CoreSolverType> CoreSolverToUse;
 
 extern llvm::cl::opt<CoreSolverType> DebugCrossCheckCoreSolverWith;
+
+extern llvm::cl::opt<bool> ProduceUnsatCore;
+
+extern llvm::cl::opt<unsigned> SymbolicAllocationThreshold;
 
 #ifdef ENABLE_METASMT
 

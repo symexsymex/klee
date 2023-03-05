@@ -7,28 +7,31 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Context.h"
+#include "klee/Core/Context.h"
 
 #include "klee/Expr/Expr.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/IR/Type.h"
-#include "llvm/IR/DerivedTypes.h"
+DISABLE_WARNING_POP
 
 #include <cassert>
 
 using namespace klee;
 
-static bool Initialized = false;
+bool klee::ContextInitialized = false;
 static Context TheContext;
 
 void Context::initialize(bool IsLittleEndian, Expr::Width PointerWidth) {
-  assert(!Initialized && "Duplicate context initialization!");
+  assert(!ContextInitialized && "Duplicate context initialization!");
   TheContext = Context(IsLittleEndian, PointerWidth);
-  Initialized = true;
+  ContextInitialized = true;
 }
 
 const Context &Context::get() {
-  assert(Initialized && "Context has not been initialized!");
+  assert(ContextInitialized && "Context has not been initialized!");
   return TheContext;
 }
 

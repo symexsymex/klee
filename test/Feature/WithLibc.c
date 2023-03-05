@@ -4,6 +4,11 @@
 // RUN: echo "good" > %t3.good
 // RUN: diff %t3.log %t3.good
 
+#include "klee/klee.h"
+
+#include <stdio.h>
+#include <string.h>
+
 int main() {
   char buf[4];
   char *s = "foo";
@@ -11,13 +16,13 @@ int main() {
   klee_make_symbolic(buf, sizeof buf, "buf");
   buf[3] = 0;
 
-  if (strcmp(buf, s)==0) {
-    if (buf[0]=='f' && buf[1]=='o' && buf[2]=='o' && buf[3]==0) {
+  if (strcmp(buf, s) == 0) {
+    if (buf[0] == 'f' && buf[1] == 'o' && buf[2] == 'o' && buf[3] == 0) {
       printf("good\n");
     } else {
       printf("bad\n");
     }
   }
-  
+
   return 0;
 }

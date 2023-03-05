@@ -10,18 +10,26 @@
 #ifndef KLEE_MEMORY_H
 #define KLEE_MEMORY_H
 
-#include "Context.h"
+#include "MemoryManager.h"
 #include "TimingSolver.h"
+#include "klee/Core/Context.h"
 
+#include "klee/Expr/Assignment.h"
 #include "klee/Expr/Expr.h"
+#include "klee/Expr/SourceBuilder.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/ADT/StringExtras.h"
+DISABLE_WARNING_POP
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace llvm {
-  class Value;
+class Value;
 }
 
 namespace klee {
@@ -29,8 +37,13 @@ namespace klee {
 class ArrayCache;
 class BitArray;
 class ExecutionState;
+class KType;
 class MemoryManager;
 class Solver;
+
+typedef uint64_t IDType;
+
+extern llvm::cl::opt<bool> UseTypeBasedAliasAnalysis;
 
 class MemoryObject {
   friend class STPBuilder;
@@ -40,21 +53,33 @@ class MemoryObject {
   friend class ref<const MemoryObject>;
 
 private:
-  static int counter;
+  // Counter is using for id's of MemoryObjects.
+  //
+  // Value 0 is reserved for erroneous objects.
+  static IDType counter;
+  static int time;
   /// @brief Required by klee::ref-managed objects
   mutable class ReferenceCounter _refCount;
 
 public:
-  unsigned id;
+  IDType id;
+  mutable unsigned timestamp;
+
   uint64_t address;
+  ref<Expr> addressExpr;
 
   /// size in bytes
   unsigned size;
+  ref<Expr> sizeExpr;
+
+  uint64_t alignment;
+
   mutable std::string name;
 
   bool isLocal;
   mutable bool isGlobal;
   bool isFixed;
+  bool isLazyInitialized;
 
   bool isUserSpecified;
 
@@ -71,30 +96,28 @@ public:
 
 public:
   // XXX this is just a temp hack, should be removed
-  explicit
-  MemoryObject(uint64_t _address) 
-    : id(counter++),
-      address(_address),
-      size(0),
-      isFixed(true),
-      parent(NULL),
-      allocSite(0) {
-  }
+  explicit MemoryObject(uint64_t _address)
+      : id(0), timestamp(0), address(_address), addressExpr(nullptr), size(0),
+        sizeExpr(nullptr), alignment(0), isFixed(true),
+        isLazyInitialized(false), parent(NULL), allocSite(0) {}
 
-  MemoryObject(uint64_t _address, unsigned _size, 
-               bool _isLocal, bool _isGlobal, bool _isFixed,
-               const llvm::Value *_allocSite,
-               MemoryManager *_parent)
-    : id(counter++),
-      address(_address),
-      size(_size),
-      name("unnamed"),
-      isLocal(_isLocal),
-      isGlobal(_isGlobal),
-      isFixed(_isFixed),
-      isUserSpecified(false),
-      parent(_parent), 
-      allocSite(_allocSite) {
+  MemoryObject(
+      uint64_t _address, unsigned _size, uint64_t alignment, bool _isLocal,
+      bool _isGlobal, bool _isFixed, bool _isLazyInitialized,
+      const llvm::Value *_allocSite, MemoryManager *_parent,
+      ref<Expr> _addressExpr = nullptr, ref<Expr> _sizeExpr = nullptr,
+      unsigned _timestamp = 0 /* unused if _isLazyInitialized is false*/)
+      : id(counter++), timestamp(_timestamp), address(_address),
+        addressExpr(_addressExpr), size(_size), sizeExpr(_sizeExpr),
+        alignment(alignment), name("unnamed"), isLocal(_isLocal),
+        isGlobal(_isGlobal), isFixed(_isFixed),
+        isLazyInitialized(_isLazyInitialized), isUserSpecified(false),
+        parent(_parent), allocSite(_allocSite) {
+    if (isLazyInitialized) {
+      timestamp = _timestamp;
+    } else {
+      timestamp = time++;
+    }
   }
 
   ~MemoryObject();
@@ -102,15 +125,25 @@ public:
   /// Get an identifying string for this allocation.
   void getAllocInfo(std::string &result) const;
 
-  void setName(std::string name) const {
-    this->name = name;
-  }
+  void setName(std::string name) const { this->name = name; }
 
-  ref<ConstantExpr> getBaseExpr() const { 
+  void updateTimestamp() const { this->timestamp = time++; }
+
+  bool hasSymbolicSize() const { return !isa<ConstantExpr>(getSizeExpr()); }
+  ref<ConstantExpr> getBaseConstantExpr() const {
     return ConstantExpr::create(address, Context::get().getPointerWidth());
   }
-  ref<ConstantExpr> getSizeExpr() const { 
-    return ConstantExpr::create(size, Context::get().getPointerWidth());
+  ref<Expr> getBaseExpr() const {
+    if (addressExpr) {
+      return addressExpr;
+    }
+    return getBaseConstantExpr();
+  }
+  ref<Expr> getSizeExpr() const {
+    if (sizeExpr) {
+      return sizeExpr;
+    }
+    return Expr::createPointer(size);
   }
   ref<Expr> getOffsetExpr(ref<Expr> pointer) const {
     return SubExpr::create(pointer, getBaseExpr());
@@ -123,21 +156,21 @@ public:
   }
 
   ref<Expr> getBoundsCheckOffset(ref<Expr> offset) const {
-    if (size==0) {
-      return EqExpr::create(offset, 
-                            ConstantExpr::alloc(0, Context::get().getPointerWidth()));
-    } else {
-      return UltExpr::create(offset, getSizeExpr());
-    }
+    ref<Expr> isZeroSizeExpr =
+        EqExpr::create(Expr::createPointer(0), getSizeExpr());
+    ref<Expr> isZeroOffsetExpr = EqExpr::create(Expr::createPointer(0), offset);
+    return SelectExpr::create(isZeroSizeExpr, isZeroOffsetExpr,
+                              UltExpr::create(offset, getSizeExpr()));
   }
+
   ref<Expr> getBoundsCheckOffset(ref<Expr> offset, unsigned bytes) const {
-    if (bytes<=size) {
-      return UltExpr::create(offset, 
-                             ConstantExpr::alloc(size - bytes + 1, 
-                                                 Context::get().getPointerWidth()));
-    } else {
-      return ConstantExpr::alloc(0, Expr::Bool);
-    }
+    ref<Expr> offsetSizeCheck =
+        UleExpr::create(Expr::createPointer(bytes), getSizeExpr());
+    ref<Expr> trueExpr = UltExpr::create(
+        offset, AddExpr::create(
+                    SubExpr::create(getSizeExpr(), Expr::createPointer(bytes)),
+                    Expr::createPointer(1)));
+    return SelectExpr::create(offsetSizeCheck, trueExpr, Expr::createFalse());
   }
 
   /// Compare this object with memory object b.
@@ -156,19 +189,23 @@ public:
     if (allocSite != b.allocSite)
       return (allocSite < b.allocSite ? -1 : 1);
 
+    assert(isLazyInitialized == b.isLazyInitialized);
     return 0;
   }
+
+  bool equals(const MemoryObject &b) const { return compare(b) == 0; }
 };
 
 class ObjectState {
 private:
   friend class AddressSpace;
   friend class ref<ObjectState>;
+  friend class ref<const ObjectState>;
 
   unsigned copyOnWriteOwner; // exclusively for AddressSpace
 
   /// @brief Required by klee::ref-managed objects
-  class ReferenceCounter _refCount;
+  mutable class ReferenceCounter _refCount;
 
   ref<const MemoryObject> object;
 
@@ -189,6 +226,12 @@ private:
   // mutable because we may need flush during read of const
   mutable UpdateList updates;
 
+  bool wasZeroInitialized = true;
+
+  ref<UpdateNode> lastUpdate;
+
+  KType *dynamicType;
+
 public:
   unsigned size;
 
@@ -198,11 +241,13 @@ public:
   /// Create a new object state for the given memory object with concrete
   /// contents. The initial contents are undefined, it is the callers
   /// responsibility to initialize the object contents appropriately.
-  ObjectState(const MemoryObject *mo);
+  ObjectState(const MemoryObject *mo, KType *dt);
 
   /// Create a new object state for the given memory object with symbolic
   /// contents.
-  ObjectState(const MemoryObject *mo, const Array *array);
+  ObjectState(const MemoryObject *mo, const Array *array, KType *dt);
+  ObjectState(unsigned size, const Array *array, KType *dt);
+  ObjectState(const MemoryObject *mo, const ObjectState &os);
 
   ObjectState(const ObjectState &os);
   ~ObjectState();
@@ -237,6 +282,10 @@ public:
   void flushToConcreteStore(TimingSolver *solver,
                             const ExecutionState &state) const;
 
+  bool isAccessableFrom(KType *) const;
+
+  KType *getDynamicType() const;
+
 private:
   const UpdateList &getUpdates() const;
 
@@ -248,7 +297,7 @@ private:
   void write8(unsigned offset, ref<Expr> value);
   void write8(ref<Expr> offset, ref<Expr> value);
 
-  void fastRangeCheckOffset(ref<Expr> offset, unsigned *base_r, 
+  void fastRangeCheckOffset(ref<Expr> offset, unsigned *base_r,
                             unsigned *size_r) const;
   void flushRangeForRead(unsigned rangeBase, unsigned rangeSize) const;
   void flushRangeForWrite(unsigned rangeBase, unsigned rangeSize);
@@ -270,7 +319,7 @@ private:
 
   ArrayCache *getArrayCache() const;
 };
-  
-} // End klee namespace
+
+} // namespace klee
 
 #endif /* KLEE_MEMORY_H */

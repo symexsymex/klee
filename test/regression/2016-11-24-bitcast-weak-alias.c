@@ -4,8 +4,8 @@
 // RUN: %klee --output-dir=%t.klee-out -exit-on-error -search=nurs:covnew %t.bc DUMMY_ARG >%t1.log 2>&1
 // RUN: FileCheck -input-file=%t1.log %s
 
-// This test case is designed to cover code in `klee::getDirectCallTarget(CallSite)`.
-// In particular it designed to test the case where a bitcasted function call, calls
+// This test case is designed to cover code in `klee::getDirectCallTarget(CallBase)`.
+// In particular, it's designed to test the case where a bitcasted function call calls
 // a weak alias.
 struct v1 {
   int c;
@@ -24,8 +24,8 @@ struct v2 {
 int alias_function(struct v1 *, struct v1 *, int)
     __attribute__((weak, alias("__real_function")));
 
-int main(int argc, char** argv) {
-  struct v2 local = { .e= 0, .f=0 };
+int main(int argc, char **argv) {
+  struct v2 local = {.e = 0, .f = 0};
   int number = 0;
 
   // Call via a bitcasted alias.

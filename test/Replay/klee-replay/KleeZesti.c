@@ -8,6 +8,7 @@
 // RUN: echo -n bbbb > %t.out/bbbb.txt
 // RUN: echo -n ccc > %t.out/cccc.txt
 // RUN: %clang %s -emit-llvm %O0opt -c -o %t.bc
+// RUN: chmod +x %klee-zesti
 // RUN: %klee-zesti -only-replay-seeds -libc=uclibc -posix-runtime %t.bc -o -p -q %t.out/bbbb.txt %t.out/cccc.txt < %t.out/aaaa.txt  &> %t.out/out.txt
 // RUN: FileCheck --input-file=%t.out/out.txt %s
 
@@ -86,7 +87,7 @@ int main(int argc, char **argv) {
   }
 
   // File sizes get increased to the highest among files, so even B has file size 4.
-  // This is due to the limitaiton of posix-runtime API
+  // This is due to the limitation of posix-runtime API
   if (check_file(argv[5], 4, "ccc") == 0) {
     // CHECK-DAG: Got B file size
     printf("Got B file size\n");

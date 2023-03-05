@@ -9,26 +9,36 @@
 #ifndef KLEE_INTERPRETER_H
 #define KLEE_INTERPRETER_H
 
+#include "TerminationTypes.h"
+
+#include "klee/Module/SarifReport.h"
+
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
+#include <optional>
 
 struct KTest;
 
 namespace llvm {
+class BasicBlock;
 class Function;
 class LLVMContext;
 class Module;
 class raw_ostream;
 class raw_fd_ostream;
-}
+} // namespace llvm
 
 namespace klee {
 class ExecutionState;
+struct SarifReport;
 class Interpreter;
 class TreeStreamWriter;
+class InstructionInfoTable;
 
 class InterpreterHandler {
 public:
@@ -38,18 +48,29 @@ public:
   virtual llvm::raw_ostream &getInfoStream() const = 0;
 
   virtual std::string getOutputFilename(const std::string &filename) = 0;
-  virtual std::unique_ptr<llvm::raw_fd_ostream> openOutputFile(const std::string &filename) = 0;
+  virtual std::unique_ptr<llvm::raw_fd_ostream>
+  openOutputFile(const std::string &filename) = 0;
 
   virtual void incPathsCompleted() = 0;
   virtual void incPathsExplored(std::uint32_t num = 1) = 0;
+  virtual void incSummarizedLocations() = 0;
 
-  virtual void processTestCase(const ExecutionState &state,
-                               const char *err,
-                               const char *suffix) = 0;
+  virtual void processTestCase(const ExecutionState &state, const char *message,
+                               const char *suffix, bool isError = false) = 0;
 };
+
+enum class ExecutionKind { Forward, Bidirectional };
 
 class Interpreter {
 public:
+  enum class GuidanceKind {
+    NoGuidance,       // Default symbolic execution
+    CoverageGuidance, // Use GuidedSearcher and guidedRun to maximize full code
+                      // coverage
+    ErrorGuidance     // Use GuidedSearcher and guidedRun to maximize specified
+                      // targets coverage
+  };
+
   /// ModuleOptions - Module level options which can be set when
   /// registering a module with the interpreter.
   struct ModuleOptions {
@@ -57,22 +78,27 @@ public:
     std::string EntryPoint;
     std::string OptSuffix;
     bool Optimize;
+    bool Simplify;
     bool CheckDivZero;
     bool CheckOvershift;
+    bool WithFPRuntime;
+    bool WithPOSIXRuntime;
 
     ModuleOptions(const std::string &_LibraryDir,
                   const std::string &_EntryPoint, const std::string &_OptSuffix,
-                  bool _Optimize, bool _CheckDivZero, bool _CheckOvershift)
+                  bool _Optimize, bool _Simplify, bool _CheckDivZero,
+                  bool _CheckOvershift, bool _WithFPRuntime,
+                  bool _WithPOSIXRuntime)
         : LibraryDir(_LibraryDir), EntryPoint(_EntryPoint),
-          OptSuffix(_OptSuffix), Optimize(_Optimize),
-          CheckDivZero(_CheckDivZero), CheckOvershift(_CheckOvershift) {}
+          OptSuffix(_OptSuffix), Optimize(_Optimize), Simplify(_Simplify),
+          CheckDivZero(_CheckDivZero), CheckOvershift(_CheckOvershift),
+          WithFPRuntime(_WithFPRuntime), WithPOSIXRuntime(_WithPOSIXRuntime) {}
   };
 
-  enum LogType
-  {
-	  STP, //.CVC (STP's native language)
-	  KQUERY, //.KQUERY files (kQuery native language)
-	  SMTLIB2 //.SMT2 files (SMTLIB version 2 files)
+  enum LogType {
+    STP,    //.CVC (STP's native language)
+    KQUERY, //.KQUERY files (kQuery native language)
+    SMTLIB2 //.SMT2 files (SMTLIB version 2 files)
   };
 
   /// InterpreterOptions - Options varying the runtime behavior during
@@ -82,18 +108,19 @@ public:
     /// symbolic values. This is used to test the correctness of the
     /// symbolic execution on concrete programs.
     unsigned MakeConcreteSymbolic;
+    GuidanceKind Guidance;
+    std::optional<SarifReport> Paths;
 
-    InterpreterOptions()
-      : MakeConcreteSymbolic(false)
-    {}
+    InterpreterOptions(std::optional<SarifReport> Paths)
+        : MakeConcreteSymbolic(false), Guidance(GuidanceKind::NoGuidance),
+          Paths(std::move(Paths)) {}
   };
 
 protected:
-  const InterpreterOptions interpreterOpts;
+  const InterpreterOptions &interpreterOpts;
 
   Interpreter(const InterpreterOptions &_interpreterOpts)
-    : interpreterOpts(_interpreterOpts)
-  {}
+      : interpreterOpts(_interpreterOpts) {}
 
 public:
   virtual ~Interpreter() {}
@@ -103,13 +130,19 @@ public:
                              InterpreterHandler *ih);
 
   /// Register the module to be executed.
-  /// \param modules A list of modules that should form the final
+  /// \param userModules A list of user modules that should form the final
+  ///                module
+  /// \param libsModules A list of libs modules that should form the final
   ///                module
   /// \return The final module after it has been optimized, checks
   /// inserted, and modified for interpretation.
   virtual llvm::Module *
-  setModule(std::vector<std::unique_ptr<llvm::Module>> &modules,
-            const ModuleOptions &opts) = 0;
+  setModule(std::vector<std::unique_ptr<llvm::Module>> &userModules,
+            std::vector<std::unique_ptr<llvm::Module>> &libsModules,
+            const ModuleOptions &opts,
+            const std::unordered_set<std::string> &mainModuleFunctions,
+            const std::unordered_set<std::string> &mainModuleGlobals,
+            std::unique_ptr<InstructionInfoTable> origInfos) = 0;
 
   // supply a tree stream writer which the interpreter will use
   // to record the concrete path (as a stream of '0' and '1' bytes).
@@ -132,18 +165,18 @@ public:
   // for the search. use null to reset.
   virtual void useSeeds(const std::vector<struct KTest *> *seeds) = 0;
 
-  virtual void runFunctionAsMain(llvm::Function *f,
-                                 int argc,
-                                 char **argv,
+  virtual void runFunctionAsMain(llvm::Function *f, int argc, char **argv,
                                  char **envp) = 0;
 
   /*** Runtime options ***/
 
-  virtual void setHaltExecution(bool value) = 0;
+  virtual void setHaltExecution(HaltExecution::Reason value) = 0;
 
   virtual void setInhibitForking(bool value) = 0;
 
   virtual void prepareForEarlyExit() = 0;
+
+  virtual bool hasTargetForest() const = 0;
 
   /*** State accessor methods ***/
 
@@ -151,20 +184,22 @@ public:
 
   virtual unsigned getSymbolicPathStreamID(const ExecutionState &state) = 0;
 
-  virtual void getConstraintLog(const ExecutionState &state,
-                                std::string &res,
+  virtual void getConstraintLog(const ExecutionState &state, std::string &res,
                                 LogType logFormat = STP) = 0;
 
-  virtual bool getSymbolicSolution(const ExecutionState &state,
-                                   std::vector<
-                                   std::pair<std::string,
-                                   std::vector<unsigned char> > >
-                                   &res) = 0;
+  virtual bool getSymbolicSolution(const ExecutionState &state, KTest &res) = 0;
 
-  virtual void getCoveredLines(const ExecutionState &state,
-                               std::map<const std::string*, std::set<unsigned> > &res) = 0;
+  virtual void logState(const ExecutionState &state, int id,
+                        std::unique_ptr<llvm::raw_fd_ostream> &f) = 0;
+
+  virtual void
+  getCoveredLines(const ExecutionState &state,
+                  std::map<const std::string *, std::set<unsigned>> &res) = 0;
+
+  virtual void getBlockPath(const ExecutionState &state,
+                            std::string &blockPath) = 0;
 };
 
-} // End klee namespace
+} // namespace klee
 
 #endif /* KLEE_INTERPRETER_H */

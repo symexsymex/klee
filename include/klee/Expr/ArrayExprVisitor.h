@@ -15,6 +15,7 @@
 #include "klee/Expr/ExprVisitor.h"
 #include "klee/Solver/SolverCmdLine.h"
 
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -22,12 +23,13 @@ namespace klee {
 
 //------------------------------ HELPER FUNCTIONS ---------------------------//
 class ArrayExprHelper {
-private:
+public:
   static bool isReadExprAtOffset(ref<Expr> e, const ReadExpr *base,
                                  ref<Expr> offset);
 
-public:
   static ReadExpr *hasOrderedReads(const ConcatExpr &ce);
+  static void collectAlternatives(const SelectExpr &se,
+                                  std::vector<ref<Expr>> &alternatives);
 };
 
 //--------------------------- INDEX-BASED OPTIMIZATION-----------------------//
@@ -35,8 +37,6 @@ class ConstantArrayExprVisitor : public ExprVisitor {
 private:
   using bindings_ty = std::map<const Array *, std::vector<ref<Expr>>>;
   bindings_ty &arrays;
-  // Avoids adding the same index twice
-  std::unordered_set<unsigned> addedIndexes;
   bool incompatible;
 
 protected:

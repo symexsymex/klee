@@ -17,79 +17,105 @@
 #include "klee/Expr/ExprVisitor.h"
 #include "klee/Solver/IncompleteSolver.h"
 #include "klee/Support/Debug.h"
-#include "klee/Support/IntEvaluation.h" // FIXME: Use APInt
+#include "klee/Support/ErrorHandling.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
+#include "llvm/ADT/APInt.h"
 #include "llvm/Support/raw_ostream.h"
+DISABLE_WARNING_POP
 
 #include <cassert>
 #include <map>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 using namespace klee;
 
 // Hacker's Delight, pgs 58-63
-static uint64_t minOR(uint64_t a, uint64_t b,
-                      uint64_t c, uint64_t d) {
-  uint64_t temp, m = ((uint64_t) 1)<<63;
+static uint64_t minOR(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+  uint64_t temp, m = ((uint64_t)1) << 63;
   while (m) {
     if (~a & c & m) {
       temp = (a | m) & -m;
-      if (temp <= b) { a = temp; break; }
+      if (temp <= b) {
+        a = temp;
+        break;
+      }
     } else if (a & ~c & m) {
       temp = (c | m) & -m;
-      if (temp <= d) { c = temp; break; }
+      if (temp <= d) {
+        c = temp;
+        break;
+      }
     }
     m >>= 1;
   }
-  
+
   return a | c;
 }
-static uint64_t maxOR(uint64_t a, uint64_t b,
-                      uint64_t c, uint64_t d) {
-  uint64_t temp, m = ((uint64_t) 1)<<63;
+static uint64_t maxOR(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+  uint64_t temp, m = ((uint64_t)1) << 63;
 
   while (m) {
     if (b & d & m) {
       temp = (b - m) | (m - 1);
-      if (temp >= a) { b = temp; break; }
-      temp = (d - m) | (m -1);
-      if (temp >= c) { d = temp; break; }
+      if (temp >= a) {
+        b = temp;
+        break;
+      }
+      temp = (d - m) | (m - 1);
+      if (temp >= c) {
+        d = temp;
+        break;
+      }
     }
     m >>= 1;
   }
 
   return b | d;
 }
-static uint64_t minAND(uint64_t a, uint64_t b,
-                       uint64_t c, uint64_t d) {
-  uint64_t temp, m = ((uint64_t) 1)<<63;
+static uint64_t minAND(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+  uint64_t temp, m = ((uint64_t)1) << 63;
   while (m) {
     if (~a & ~c & m) {
       temp = (a | m) & -m;
-      if (temp <= b) { a = temp; break; }
+      if (temp <= b) {
+        a = temp;
+        break;
+      }
       temp = (c | m) & -m;
-      if (temp <= d) { c = temp; break; }
+      if (temp <= d) {
+        c = temp;
+        break;
+      }
     }
     m >>= 1;
   }
-  
+
   return a & c;
 }
-static uint64_t maxAND(uint64_t a, uint64_t b,
-                       uint64_t c, uint64_t d) {
-  uint64_t temp, m = ((uint64_t) 1)<<63;
+static uint64_t maxAND(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+  uint64_t temp, m = ((uint64_t)1) << 63;
   while (m) {
     if (b & ~d & m) {
       temp = (b & ~m) | (m - 1);
-      if (temp >= a) { b = temp; break; }
+      if (temp >= a) {
+        b = temp;
+        break;
+      }
     } else if (~b & d & m) {
       temp = (d & ~m) | (m - 1);
-      if (temp >= c) { d = temp; break; }
+      if (temp >= c) {
+        d = temp;
+        break;
+      }
     }
     m >>= 1;
   }
-  
+
   return b & d;
 }
 
@@ -124,10 +150,10 @@ public:
 
   bool isEmpty() const noexcept { return m_min > m_max; }
   bool contains(std::uint64_t value) const {
-    return this->intersects(ValueRange(value)); 
+    return this->intersects(ValueRange(value));
   }
-  bool intersects(const ValueRange &b) const { 
-    return !this->set_intersection(b).isEmpty(); 
+  bool intersects(const ValueRange &b) const {
+    return !this->set_intersection(b).isEmpty();
   }
 
   bool isFullRange(unsigned bits) const noexcept {
@@ -243,7 +269,7 @@ public:
   bool mayEqual(const std::uint64_t b) const noexcept {
     return m_min <= b && m_max >= b;
   }
-  
+
   bool mustEqual(const ValueRange &b) const noexcept {
     return isFixed() && b.isFixed() && m_min == b.m_min;
   }
@@ -251,15 +277,16 @@ public:
 
   std::uint64_t min() const noexcept {
     assert(!isEmpty() && "cannot get minimum of empty range");
-    return m_min; 
+    return m_min;
   }
 
   std::uint64_t max() const noexcept {
     assert(!isEmpty() && "cannot get maximum of empty range");
-    return m_max; 
+    return m_max;
   }
-  
+
   std::int64_t minSigned(unsigned bits) const {
+    assert(bits >= 2 && bits <= 64);
     assert((m_min >> bits) == 0 && (m_max >> bits) == 0 &&
            "range is outside given number of bits");
 
@@ -269,13 +296,14 @@ public:
 
     std::uint64_t smallest = (static_cast<std::uint64_t>(1) << (bits - 1));
     if (m_max >= smallest) {
-      return ints::sext(smallest, 64, bits);
+      return llvm::APInt::getSignedMinValue(bits).getSExtValue();
     } else {
       return m_min;
     }
   }
 
   std::int64_t maxSigned(unsigned bits) const {
+    assert(bits >= 2 && bits <= 64);
     assert((m_min >> bits) == 0 && (m_max >> bits) == 0 &&
            "range is outside given number of bits");
 
@@ -288,7 +316,7 @@ public:
     if (m_min < smallest && m_max >= smallest) {
       return smallest - 1;
     } else {
-      return ints::sext(m_max, 64, bits);
+      return llvm::APInt(bits, m_max, true).getSExtValue();
     }
   }
 };
@@ -315,8 +343,8 @@ class CexObjectData {
   /// for each array location.
   std::vector<CexValueData> exactContents;
 
-  CexObjectData(const CexObjectData&); // DO NOT IMPLEMENT
-  void operator=(const CexObjectData&); // DO NOT IMPLEMENT
+  CexObjectData(const CexObjectData &);  // DO NOT IMPLEMENT
+  void operator=(const CexObjectData &); // DO NOT IMPLEMENT
 
 public:
   CexObjectData(uint64_t size) : possibleContents(size), exactContents(size) {
@@ -326,7 +354,7 @@ public:
     }
   }
 
-  const CexValueData getPossibleValues(size_t index) const { 
+  const CexValueData getPossibleValues(size_t index) const {
     return possibleContents[index];
   }
   void setPossibleValues(size_t index, CexValueData values) {
@@ -336,7 +364,7 @@ public:
     possibleContents[index] = CexValueData(value);
   }
 
-  const CexValueData getExactValues(size_t index) const { 
+  const CexValueData getExactValues(size_t index) const {
     return exactContents[index];
   }
   void setExactValues(size_t index, CexValueData values) {
@@ -352,105 +380,138 @@ public:
 
 class CexRangeEvaluator : public ExprRangeEvaluator<ValueRange> {
 public:
-  std::map<const Array*, CexObjectData*> &objects;
-  CexRangeEvaluator(std::map<const Array*, CexObjectData*> &_objects) 
-    : objects(_objects) {}
+  std::map<const Array *, CexObjectData *> &objects;
+  CexRangeEvaluator(std::map<const Array *, CexObjectData *> &_objects)
+      : objects(_objects) {}
 
   ValueRange getInitialReadRange(const Array &array, ValueRange index) {
     // Check for a concrete read of a constant array.
-    if (array.isConstantArray() && 
-        index.isFixed() && 
-        index.min() < array.size)
-      return ValueRange(array.constantValues[index.min()]->getZExtValue(8));
-
+    if (array.isConstantArray() && index.isFixed()) {
+      if (ref<ConstantSource> constantSource =
+              dyn_cast<ConstantSource>(array.source)) {
+        if (index.min() < constantSource->constantValues.size()) {
+          return ValueRange(
+              constantSource->constantValues[index.min()]->getZExtValue(8));
+        }
+      } else if (ref<SymbolicSizeConstantSource> symbolicSizeConstantSource =
+                     dyn_cast<SymbolicSizeConstantSource>(array.source)) {
+        return ValueRange(symbolicSizeConstantSource->defaultValue);
+      }
+    }
     return ValueRange(0, 255);
   }
 };
 
 class CexPossibleEvaluator : public ExprEvaluator {
 protected:
-  ref<Expr> getInitialValue(const Array& array, unsigned index) {
+  ref<Expr> getInitialValue(const Array &array, unsigned index) {
     // If the index is out of range, we cannot assign it a value, since that
     // value cannot be part of the assignment.
-    if (index >= array.size)
-      return ReadExpr::create(UpdateList(&array, 0), 
+    ref<ConstantExpr> constantArraySize = dyn_cast<ConstantExpr>(array.size);
+    if (!constantArraySize) {
+      klee_error(
+          "FIXME: Arrays of symbolic sizes are unsupported in FastCex\n");
+      std::abort();
+    }
+
+    if (index >= constantArraySize->getZExtValue()) {
+      return ReadExpr::create(UpdateList(&array, 0),
                               ConstantExpr::alloc(index, array.getDomain()));
-      
-    std::map<const Array*, CexObjectData*>::iterator it = objects.find(&array);
-    return ConstantExpr::alloc((it == objects.end() ? 127 : 
-                                it->second->getPossibleValue(index)),
-                               array.getRange());
+    }
+
+    std::map<const Array *, CexObjectData *>::iterator it =
+        objects.find(&array);
+    return ConstantExpr::alloc(
+        (it == objects.end() ? 127 : it->second->getPossibleValue(index)),
+        array.getRange());
   }
 
 public:
-  std::map<const Array*, CexObjectData*> &objects;
-  CexPossibleEvaluator(std::map<const Array*, CexObjectData*> &_objects) 
-    : objects(_objects) {}
+  std::map<const Array *, CexObjectData *> &objects;
+  CexPossibleEvaluator(std::map<const Array *, CexObjectData *> &_objects)
+      : objects(_objects) {}
 };
 
 class CexExactEvaluator : public ExprEvaluator {
 protected:
-  ref<Expr> getInitialValue(const Array& array, unsigned index) {
+  ref<Expr> getInitialValue(const Array &array, unsigned index) {
     // If the index is out of range, we cannot assign it a value, since that
     // value cannot be part of the assignment.
-    if (index >= array.size)
-      return ReadExpr::create(UpdateList(&array, 0), 
+    ref<ConstantExpr> constantArraySize = dyn_cast<ConstantExpr>(array.size);
+    if (!constantArraySize) {
+      klee_error(
+          "FIXME: Arrays of symbolic sizes are unsupported in FastCex\n");
+      std::abort();
+    }
+
+    if (index >= constantArraySize->getZExtValue()) {
+      return ReadExpr::create(UpdateList(&array, 0),
                               ConstantExpr::alloc(index, array.getDomain()));
-      
-    std::map<const Array*, CexObjectData*>::iterator it = objects.find(&array);
+    }
+
+    std::map<const Array *, CexObjectData *>::iterator it =
+        objects.find(&array);
     if (it == objects.end())
-      return ReadExpr::create(UpdateList(&array, 0), 
+      return ReadExpr::create(UpdateList(&array, 0),
                               ConstantExpr::alloc(index, array.getDomain()));
 
     CexValueData cvd = it->second->getExactValues(index);
     if (!cvd.isFixed())
-      return ReadExpr::create(UpdateList(&array, 0), 
+      return ReadExpr::create(UpdateList(&array, 0),
                               ConstantExpr::alloc(index, array.getDomain()));
 
     return ConstantExpr::alloc(cvd.min(), array.getRange());
   }
 
 public:
-  std::map<const Array*, CexObjectData*> &objects;
-  CexExactEvaluator(std::map<const Array*, CexObjectData*> &_objects) 
-    : objects(_objects) {}
+  std::map<const Array *, CexObjectData *> &objects;
+  CexExactEvaluator(std::map<const Array *, CexObjectData *> &_objects)
+      : objects(_objects) {}
 };
 
 class CexData {
 public:
-  std::map<const Array*, CexObjectData*> objects;
+  std::map<const Array *, CexObjectData *> objects;
 
-  CexData(const CexData&); // DO NOT IMPLEMENT
-  void operator=(const CexData&); // DO NOT IMPLEMENT
+  CexData(const CexData &);        // DO NOT IMPLEMENT
+  void operator=(const CexData &); // DO NOT IMPLEMENT
 
 public:
   CexData() {}
   ~CexData() {
-    for (std::map<const Array*, CexObjectData*>::iterator it = objects.begin(),
-           ie = objects.end(); it != ie; ++it)
+    for (std::map<const Array *, CexObjectData *>::iterator
+             it = objects.begin(),
+             ie = objects.end();
+         it != ie; ++it)
       delete it->second;
   }
 
   CexObjectData &getObjectData(const Array *A) {
     CexObjectData *&Entry = objects[A];
 
+    ref<ConstantExpr> constantArraySize = dyn_cast<ConstantExpr>(A->size);
+    if (!constantArraySize) {
+      klee_error(
+          "FIXME: Arrays of symbolic sizes are unsupported in FastCex\n");
+      std::abort();
+    }
+
     if (!Entry)
-      Entry = new CexObjectData(A->size);
+      Entry = new CexObjectData(constantArraySize->getZExtValue());
 
     return *Entry;
   }
 
-  void propogatePossibleValue(ref<Expr> e, uint64_t value) {
-    propogatePossibleValues(e, CexValueData(value,value));
+  void propagatePossibleValue(ref<Expr> e, uint64_t value) {
+    propagatePossibleValues(e, CexValueData(value, value));
   }
 
-  void propogateExactValue(ref<Expr> e, uint64_t value) {
-    propogateExactValues(e, CexValueData(value,value));
+  void propagateExactValue(ref<Expr> e, uint64_t value) {
+    propagateExactValues(e, CexValueData(value, value));
   }
 
-  void propogatePossibleValues(ref<Expr> e, CexValueData range) {
-    KLEE_DEBUG(llvm::errs() << "propogate: " << range << " for\n"
-               << e << "\n");
+  void propagatePossibleValues(ref<Expr> e, CexValueData range) {
+    KLEE_DEBUG(llvm::errs() << "propagate: " << range << " for\n" << e << "\n");
 
     switch (e->getKind()) {
     case Expr::Constant:
@@ -460,7 +521,8 @@ public:
 
       // Special
 
-    case Expr::NotOptimized: break;
+    case Expr::NotOptimized:
+      break;
 
     case Expr::Read: {
       ReadExpr *re = cast<ReadExpr>(e);
@@ -470,20 +532,25 @@ public:
       // FIXME: This is imprecise, we need to look through the existing writes
       // to see if this is an initial read or not.
       if (ConstantExpr *CE = dyn_cast<ConstantExpr>(re->index)) {
-        uint64_t index = CE->getZExtValue();
+        if (ref<ConstantExpr> constantArraySize =
+                dyn_cast<ConstantExpr>(array->size)) {
+          uint64_t index = CE->getZExtValue();
 
-        if (index < array->size) {
-          // If the range is fixed, just set that; even if it conflicts with the
-          // previous range it should be a better guess.
-          if (range.isFixed()) {
-            cod.setPossibleValue(index, range.min());
-          } else {
-            CexValueData cvd = cod.getPossibleValues(index);
-            CexValueData tmp = cvd.set_intersection(range);
+          if (index < constantArraySize->getZExtValue()) {
+            // If the range is fixed, just set that; even if it conflicts with
+            // the previous range it should be a better guess.
+            if (range.isFixed()) {
+              cod.setPossibleValue(index, range.min());
+            } else {
+              CexValueData cvd = cod.getPossibleValues(index);
+              CexValueData tmp = cvd.set_intersection(range);
 
-            if (!tmp.isEmpty())
-              cod.setPossibleValues(index, tmp);
+              if (!tmp.isEmpty())
+                cod.setPossibleValues(index, tmp);
+            }
           }
+        } else {
+          // XXX        fatal("XXX not implemented");
         }
       } else {
         // XXX        fatal("XXX not implemented");
@@ -496,9 +563,9 @@ public:
       ValueRange cond = evalRangeForExpr(se->cond);
       if (cond.isFixed()) {
         if (cond.min()) {
-          propogatePossibleValues(se->trueExpr, range);
+          propagatePossibleValues(se->trueExpr, range);
         } else {
-          propogatePossibleValues(se->falseExpr, range);
+          propagatePossibleValues(se->falseExpr, range);
         }
       } else {
         // XXX imprecise... we have a choice here. One method is to
@@ -517,14 +584,14 @@ public:
         // (either because the condition cannot be that, or the
         // resulting range given that condition is not in the required
         // range).
-        // 
+        //
         // Currently we just force both into the range. A hybrid would
         // be to evaluate the ranges for each of the children... if
         // one of the ranges happens to already be a subset of the
         // required range then it may be preferable to force the
         // condition to that side.
-        propogatePossibleValues(se->trueExpr, range);
-        propogatePossibleValues(se->falseExpr, range);
+        propagatePossibleValues(se->trueExpr, range);
+        propagatePossibleValues(se->falseExpr, range);
       }
       break;
     }
@@ -542,9 +609,9 @@ public:
       ConcatExpr *ce = cast<ConcatExpr>(e);
       Expr::Width LSBWidth = ce->getKid(1)->getWidth();
       Expr::Width MSBWidth = ce->getKid(1)->getWidth();
-      propogatePossibleValues(ce->getKid(0), 
+      propagatePossibleValues(ce->getKid(0),
                               range.extract(LSBWidth, LSBWidth + MSBWidth));
-      propogatePossibleValues(ce->getKid(1), range.extract(0, LSBWidth));
+      propagatePossibleValues(ce->getKid(1), range.extract(0, LSBWidth));
       break;
     }
 
@@ -563,9 +630,9 @@ public:
     case Expr::ZExt: {
       CastExpr *ce = cast<CastExpr>(e);
       unsigned inBits = ce->src->getWidth();
-      ValueRange input = 
-        range.set_intersection(ValueRange(0, bits64::maxValueOfNBits(inBits)));
-      propogatePossibleValues(ce->src, input);
+      ValueRange input = range.set_intersection(
+          ValueRange(0, bits64::maxValueOfNBits(inBits)));
+      propagatePossibleValues(ce->src, input);
       break;
     }
       // For SExt instead of doing the intersection we just take the output
@@ -575,12 +642,11 @@ public:
       CastExpr *ce = cast<CastExpr>(e);
       unsigned inBits = ce->src->getWidth();
       unsigned outBits = ce->width;
-      ValueRange output = 
-        range.set_difference(ValueRange(1<<(inBits-1),
-                                        (bits64::maxValueOfNBits(outBits) -
-                                         bits64::maxValueOfNBits(inBits-1)-1)));
+      ValueRange output = range.set_difference(ValueRange(
+          1 << (inBits - 1), (bits64::maxValueOfNBits(outBits) -
+                              bits64::maxValueOfNBits(inBits - 1) - 1)));
       ValueRange input = output.binaryAnd(bits64::maxValueOfNBits(inBits));
-      propogatePossibleValues(ce->src, input);
+      propagatePossibleValues(ce->src, input);
       break;
     }
 
@@ -591,17 +657,18 @@ public:
       if (ConstantExpr *CE = dyn_cast<ConstantExpr>(be->left)) {
         // FIXME: Don't depend on width.
         if (CE->getWidth() <= 64) {
-          // FIXME: Why do we ever propogate empty ranges? It doesn't make
+          // FIXME: Why do we ever propagate empty ranges? It doesn't make
           // sense.
           if (range.isEmpty())
             break;
 
           // C_0 + X \in [MIN, MAX) ==> X \in [MIN - C_0, MAX - C_0)
           Expr::Width W = CE->getWidth();
-          CexValueData nrange(ConstantExpr::alloc(range.min(), W)->Sub(CE)->getZExtValue(),
-                              ConstantExpr::alloc(range.max(), W)->Sub(CE)->getZExtValue());
+          CexValueData nrange(
+              ConstantExpr::alloc(range.min(), W)->Sub(CE)->getZExtValue(),
+              ConstantExpr::alloc(range.max(), W)->Sub(CE)->getZExtValue());
           if (!nrange.isEmpty())
-            propogatePossibleValues(be->right, nrange);
+            propagatePossibleValues(be->right, nrange);
         }
       }
       break;
@@ -609,7 +676,7 @@ public:
 
     case Expr::And: {
       BinaryExpr *be = cast<BinaryExpr>(e);
-      if (be->getWidth()==Expr::Bool) {
+      if (be->getWidth() == Expr::Bool) {
         if (range.isFixed()) {
           ValueRange left = evalRangeForExpr(be->left);
           ValueRange right = evalRangeForExpr(be->right);
@@ -620,16 +687,18 @@ public:
             } else {
               // XXX heuristic, which order
 
-              propogatePossibleValue(be->left, 0);
+              propagatePossibleValue(be->left, 0);
               left = evalRangeForExpr(be->left);
 
               // see if that worked
               if (!left.mustEqual(1))
-                propogatePossibleValue(be->right, 0);
+                propagatePossibleValue(be->right, 0);
             }
           } else {
-            if (!left.mustEqual(1)) propogatePossibleValue(be->left, 1);
-            if (!right.mustEqual(1)) propogatePossibleValue(be->right, 1);
+            if (!left.mustEqual(1))
+              propagatePossibleValue(be->left, 1);
+            if (!right.mustEqual(1))
+              propagatePossibleValue(be->right, 1);
           }
         }
       } else {
@@ -640,7 +709,7 @@ public:
 
     case Expr::Or: {
       BinaryExpr *be = cast<BinaryExpr>(e);
-      if (be->getWidth()==Expr::Bool) {
+      if (be->getWidth() == Expr::Bool) {
         if (range.isFixed()) {
           ValueRange left = evalRangeForExpr(be->left);
           ValueRange right = evalRangeForExpr(be->right);
@@ -650,18 +719,20 @@ public:
               // all is well
             } else {
               // XXX heuristic, which order?
-              
+
               // force left to value we need
-              propogatePossibleValue(be->left, 1);
+              propagatePossibleValue(be->left, 1);
               left = evalRangeForExpr(be->left);
 
               // see if that worked
               if (!left.mustEqual(1))
-                propogatePossibleValue(be->right, 1);
+                propagatePossibleValue(be->right, 1);
             }
           } else {
-            if (!left.mustEqual(0)) propogatePossibleValue(be->left, 0);
-            if (!right.mustEqual(0)) propogatePossibleValue(be->right, 0);
+            if (!left.mustEqual(0))
+              propagatePossibleValue(be->left, 0);
+            if (!right.mustEqual(0))
+              propagatePossibleValue(be->right, 0);
           }
         }
       } else {
@@ -670,7 +741,8 @@ public:
       break;
     }
 
-    case Expr::Xor: break;
+    case Expr::Xor:
+      break;
 
       // Comparison
 
@@ -682,18 +754,18 @@ public:
           if (CE->getWidth() <= 64) {
             uint64_t value = CE->getZExtValue();
             if (range.min()) {
-              propogatePossibleValue(be->right, value);
+              propagatePossibleValue(be->right, value);
             } else {
               CexValueData range;
-              if (value==0) {
-                range = CexValueData(1, 
-                                     bits64::maxValueOfNBits(CE->getWidth()));
+              if (value == 0) {
+                range =
+                    CexValueData(1, bits64::maxValueOfNBits(CE->getWidth()));
               } else {
                 // FIXME: heuristic / lossy, could be better to pick larger
                 // range?
                 range = CexValueData(0, value - 1);
               }
-              propogatePossibleValues(be->right, range);
+              propagatePossibleValues(be->right, range);
             }
           } else {
             // XXX what now
@@ -705,14 +777,14 @@ public:
 
     case Expr::Not: {
       if (e->getWidth() == Expr::Bool && range.isFixed()) {
-	propogatePossibleValue(e->getKid(0), !range.min());
+        propagatePossibleValue(e->getKid(0), !range.min());
       }
       break;
     }
 
     case Expr::Ult: {
       BinaryExpr *be = cast<BinaryExpr>(e);
-      
+
       // XXX heuristic / lossy, what order if conflict
 
       if (range.isFixed()) {
@@ -725,17 +797,17 @@ public:
 
         if (left.isFixed()) {
           if (range.min()) {
-            propogatePossibleValues(be->right, CexValueData(left.min()+1, 
-                                                            maxValue));
+            propagatePossibleValues(be->right,
+                                    CexValueData(left.min() + 1, maxValue));
           } else {
-            propogatePossibleValues(be->right, CexValueData(0, left.min()));
+            propagatePossibleValues(be->right, CexValueData(0, left.min()));
           }
         } else if (right.isFixed()) {
           if (range.min()) {
-            propogatePossibleValues(be->left, CexValueData(0, right.min()-1));
+            propagatePossibleValues(be->left, CexValueData(0, right.min() - 1));
           } else {
-            propogatePossibleValues(be->left, CexValueData(right.min(), 
-                                                           maxValue));
+            propagatePossibleValues(be->left,
+                                    CexValueData(right.min(), maxValue));
           }
         } else {
           // XXX ???
@@ -745,7 +817,7 @@ public:
     }
     case Expr::Ule: {
       BinaryExpr *be = cast<BinaryExpr>(e);
-      
+
       // XXX heuristic / lossy, what order if conflict
 
       if (range.isFixed()) {
@@ -757,17 +829,17 @@ public:
         uint64_t maxValue = bits64::maxValueOfNBits(be->right->getWidth());
         if (left.isFixed()) {
           if (range.min()) {
-            propogatePossibleValues(be->right, CexValueData(left.min(), 
-                                                            maxValue));
+            propagatePossibleValues(be->right,
+                                    CexValueData(left.min(), maxValue));
           } else {
-            propogatePossibleValues(be->right, CexValueData(0, left.min()-1));
+            propagatePossibleValues(be->right, CexValueData(0, left.min() - 1));
           }
         } else if (right.isFixed()) {
           if (range.min()) {
-            propogatePossibleValues(be->left, CexValueData(0, right.min()));
+            propagatePossibleValues(be->left, CexValueData(0, right.min()));
           } else {
-            propogatePossibleValues(be->left, CexValueData(right.min()+1, 
-                                                           maxValue));
+            propagatePossibleValues(be->left,
+                                    CexValueData(right.min() + 1, maxValue));
           }
         } else {
           // XXX ???
@@ -788,7 +860,7 @@ public:
     }
   }
 
-  void propogateExactValues(ref<Expr> e, CexValueData range) {
+  void propagateExactValues(ref<Expr> e, CexValueData range) {
     switch (e->getKind()) {
     case Expr::Constant: {
       // FIXME: Assert that range contains this constant.
@@ -797,7 +869,8 @@ public:
 
       // Special
 
-    case Expr::NotOptimized: break;
+    case Expr::NotOptimized:
+      break;
 
     case Expr::Read: {
       ReadExpr *re = cast<ReadExpr>(e);
@@ -808,22 +881,25 @@ public:
       for (const auto *un = re->updates.head.get(); un; un = un->next.get()) {
         CexValueData ui = evalRangeForExpr(un->index);
 
-        // If these indices can't alias, continue propogation
+        // If these indices can't alias, continue propagation
         if (!ui.mayEqual(index))
           continue;
 
-        // Otherwise if we know they alias, propogate into the write value.
+        // Otherwise if we know they alias, propagate into the write value.
         if (ui.mustEqual(index) || re->index == un->index)
-          propogateExactValues(un->value, range);
+          propagateExactValues(un->value, range);
         return;
       }
 
       // We reached the initial array write, update the exact range if possible.
       if (index.isFixed()) {
-        if (array->isConstantArray()) {
+        if (ref<ConstantSource> constantSource =
+                dyn_cast<ConstantSource>(array->source)) {
           // Verify the range.
-          propogateExactValues(array->constantValues[index.min()],
+          propagateExactValues(constantSource->constantValues[index.min()],
                                range);
+        } else if (isa<SymbolicSizeConstantSource>(array->source)) {
+          assert(0 && "not implemented");
         } else {
           CexValueData cvd = cod.getExactValues(index.min());
           if (range.min() > cvd.min()) {
@@ -886,13 +962,13 @@ public:
           if (CE->getWidth() <= 64) {
             uint64_t value = CE->getZExtValue();
             if (range.min()) {
-              // If the equality is true, then propogate the value.
-              propogateExactValue(be->right, value);
+              // If the equality is true, then propagate the value.
+              propagateExactValue(be->right, value);
             } else {
               // If the equality is false and the comparison is of booleans,
-              // then we can infer the value to propogate.
+              // then we can infer the value to propagate.
               if (be->right->getWidth() == Expr::Bool)
-                propogateExactValue(be->right, !value);
+                propagateExactValue(be->right, !value);
             }
           }
         }
@@ -903,7 +979,7 @@ public:
     // If a boolean not, and the result is known, propagate it
     case Expr::Not: {
       if (e->getWidth() == Expr::Bool && range.isFixed()) {
-	propogateExactValue(e->getKid(0), !range.min());
+        propagateExactValue(e->getKid(0), !range.min());
       }
       break;
     }
@@ -944,24 +1020,30 @@ public:
   }
 
   void dump() {
-    llvm::errs() << "-- propogated values --\n";
+    llvm::errs() << "-- propagated values --\n";
     for (std::map<const Array *, CexObjectData *>::iterator
              it = objects.begin(),
              ie = objects.end();
          it != ie; ++it) {
       const Array *A = it->first;
+      ref<ConstantExpr> arrayConstantSize = dyn_cast<ConstantExpr>(A->size);
+      if (!arrayConstantSize) {
+        klee_warning("Cannot dump %s as it has symbolic size\n",
+                     A->getIdentifier().c_str());
+      }
+
       CexObjectData *COD = it->second;
 
-      llvm::errs() << A->name << "\n";
+      llvm::errs() << A->getIdentifier() << "\n";
       llvm::errs() << "possible: [";
-      for (unsigned i = 0; i < A->size; ++i) {
+      for (unsigned i = 0; i < arrayConstantSize->getZExtValue(); ++i) {
         if (i)
           llvm::errs() << ", ";
         llvm::errs() << COD->getPossibleValues(i);
       }
       llvm::errs() << "]\n";
       llvm::errs() << "exact   : [";
-      for (unsigned i = 0; i < A->size; ++i) {
+      for (unsigned i = 0; i < arrayConstantSize->getZExtValue(); ++i) {
         if (i)
           llvm::errs() << ", ";
         llvm::errs() << COD->getExactValues(i);
@@ -973,51 +1055,51 @@ public:
 
 /* *** */
 
-
 class FastCexSolver : public IncompleteSolver {
 public:
   FastCexSolver();
   ~FastCexSolver();
 
-  IncompleteSolver::PartialValidity computeTruth(const Query&);  
-  bool computeValue(const Query&, ref<Expr> &result);
-  bool computeInitialValues(const Query&,
-                            const std::vector<const Array*> &objects,
-                            std::vector< std::vector<unsigned char> > &values,
+  PartialValidity computeTruth(const Query &);
+  bool computeValue(const Query &, ref<Expr> &result);
+  bool computeInitialValues(const Query &,
+                            const std::vector<const Array *> &objects,
+                            std::vector<SparseStorage<unsigned char>> &values,
                             bool &hasSolution);
 };
 
-FastCexSolver::FastCexSolver() { }
+FastCexSolver::FastCexSolver() {}
 
-FastCexSolver::~FastCexSolver() { }
+FastCexSolver::~FastCexSolver() {}
 
-/// propogateValues - Propogate value ranges for the given query and return the
-/// propogation results.
+/// propagateValues - propagate value ranges for the given query and return the
+/// propagation results.
 ///
-/// \param query - The query to propogate values for.
+/// \param query - The query to propagate values for.
 ///
-/// \param cd - The initial object values resulting from the propogation.
+/// \param cd - The initial object values resulting from the propagation.
 ///
 /// \param checkExpr - Include the query expression in the constraints to
-/// propogate.
+/// propagate.
 ///
-/// \param isValid - If the propogation succeeds (returns true), whether the
+/// \param isValid - If the propagation succeeds (returns true), whether the
 /// constraints were proven valid or invalid.
 ///
 /// \return - True if the propogation was able to prove validity or invalidity.
-static bool propogateValues(const Query& query, CexData &cd, 
-                            bool checkExpr, bool &isValid) {
-  for (const auto &constraint : query.constraints) {
-    cd.propogatePossibleValue(constraint, 1);
-    cd.propogateExactValue(constraint, 1);
+static bool propagateValues(const Query &query, CexData &cd, bool checkExpr,
+                            bool &isValid) {
+  assert(!query.containsSymcretes());
+  for (const auto &constraint : query.constraints.cs()) {
+    cd.propagatePossibleValue(constraint, 1);
+    cd.propagateExactValue(constraint, 1);
   }
   if (checkExpr) {
-    cd.propogatePossibleValue(query.expr, 0);
-    cd.propogateExactValue(query.expr, 0);
+    cd.propagatePossibleValue(query.expr, 0);
+    cd.propagateExactValue(query.expr, 0);
   }
 
   KLEE_DEBUG(cd.dump());
-  
+
   // Check the result.
   bool hasSatisfyingAssignment = true;
   if (checkExpr) {
@@ -1031,7 +1113,7 @@ static bool propogateValues(const Query& query, CexData &cd,
     }
   }
 
-  for (const auto &constraint : query.constraints) {
+  for (const auto &constraint : query.constraints.cs()) {
     if (hasSatisfyingAssignment && !cd.evaluatePossible(constraint)->isTrue())
       hasSatisfyingAssignment = false;
 
@@ -1051,36 +1133,35 @@ static bool propogateValues(const Query& query, CexData &cd,
   return false;
 }
 
-IncompleteSolver::PartialValidity 
-FastCexSolver::computeTruth(const Query& query) {
+PartialValidity FastCexSolver::computeTruth(const Query &query) {
   CexData cd;
 
   bool isValid;
-  bool success = propogateValues(query, cd, true, isValid);
+  bool success = propagateValues(query, cd, true, isValid);
 
   if (!success)
-    return IncompleteSolver::None;
+    return PValidity::None;
 
-  return isValid ? IncompleteSolver::MustBeTrue : IncompleteSolver::MayBeFalse;
+  return isValid ? PValidity::MustBeTrue : PValidity::MayBeFalse;
 }
 
-bool FastCexSolver::computeValue(const Query& query, ref<Expr> &result) {
+bool FastCexSolver::computeValue(const Query &query, ref<Expr> &result) {
   CexData cd;
 
   bool isValid;
-  bool success = propogateValues(query, cd, false, isValid);
+  bool success = propagateValues(query, cd, false, isValid);
 
-  // Check if propogation wasn't able to determine anything.
+  // Check if propagation wasn't able to determine anything.
   if (!success)
     return false;
 
   // FIXME: We don't have a way to communicate valid constraints back.
   if (isValid)
     return false;
-  
+
   // Propogation found a satisfying assignment, evaluate the expression.
   ref<Expr> value = cd.evaluatePossible(query.expr);
-  
+
   if (isa<ConstantExpr>(value)) {
     // FIXME: We should be able to make sure this never fails?
     result = value;
@@ -1090,19 +1171,15 @@ bool FastCexSolver::computeValue(const Query& query, ref<Expr> &result) {
   }
 }
 
-bool
-FastCexSolver::computeInitialValues(const Query& query,
-                                    const std::vector<const Array*>
-                                      &objects,
-                                    std::vector< std::vector<unsigned char> >
-                                      &values,
-                                    bool &hasSolution) {
+bool FastCexSolver::computeInitialValues(
+    const Query &query, const std::vector<const Array *> &objects,
+    std::vector<SparseStorage<unsigned char>> &values, bool &hasSolution) {
   CexData cd;
 
   bool isValid;
-  bool success = propogateValues(query, cd, true, isValid);
+  bool success = propagateValues(query, cd, true, isValid);
 
-  // Check if propogation wasn't able to determine anything.
+  // Check if propagation wasn't able to determine anything.
   if (!success)
     return false;
 
@@ -1110,21 +1187,24 @@ FastCexSolver::computeInitialValues(const Query& query,
   if (!hasSolution)
     return true;
 
-  // Propogation found a satisfying assignment, compute the initial values.
+  // propagation found a satisfying assignment, compute the initial values.
   for (unsigned i = 0; i != objects.size(); ++i) {
     const Array *array = objects[i];
     assert(array);
-    std::vector<unsigned char> data;
-    data.reserve(array->size);
+    SparseStorage<unsigned char> data;
+    ref<ConstantExpr> arrayConstantSize =
+        dyn_cast<ConstantExpr>(cd.evaluatePossible(array->size));
+    assert(arrayConstantSize &&
+           "Array of symbolic size had not receive value for size!");
+    data.resize(arrayConstantSize->getZExtValue());
 
-    for (unsigned i=0; i < array->size; i++) {
-      ref<Expr> read = 
-        ReadExpr::create(UpdateList(array, 0),
-                         ConstantExpr::create(i, array->getDomain()));
+    for (unsigned i = 0; i < arrayConstantSize->getZExtValue(); i++) {
+      ref<Expr> read = ReadExpr::create(
+          UpdateList(array, 0), ConstantExpr::create(i, array->getDomain()));
       ref<Expr> value = cd.evaluatePossible(read);
-      
+
       if (ConstantExpr *CE = dyn_cast<ConstantExpr>(value)) {
-        data.push_back((unsigned char) CE->getZExtValue(8));
+        data.store(i, ((unsigned char)CE->getZExtValue(8)));
       } else {
         // FIXME: When does this happen?
         return false;
@@ -1137,7 +1217,7 @@ FastCexSolver::computeInitialValues(const Query& query,
   return true;
 }
 
-
-Solver *klee::createFastCexSolver(Solver *s) {
-  return new Solver(new StagedSolverImpl(new FastCexSolver(), s));
+std::unique_ptr<Solver> klee::createFastCexSolver(std::unique_ptr<Solver> s) {
+  return std::make_unique<Solver>(std::make_unique<StagedSolverImpl>(
+      std::make_unique<FastCexSolver>(), std::move(s)));
 }

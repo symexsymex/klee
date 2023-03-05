@@ -12,7 +12,11 @@
 #include "klee/Config/config.h"
 #include "klee/Support/ErrorHandling.h"
 
+#include "klee/Support/CompilerWarning.h"
+DISABLE_WARNING_PUSH
+DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/Support/FileSystem.h"
+DISABLE_WARNING_POP
 
 #ifdef HAVE_ZLIB_H
 #include "klee/Support/CompressionStream.h"
@@ -25,14 +29,8 @@ klee_open_output_file(const std::string &path, std::string &error) {
   error.clear();
   std::error_code ec;
 
-#if LLVM_VERSION_CODE >= LLVM_VERSION(7, 0)
   auto f = std::make_unique<llvm::raw_fd_ostream>(path.c_str(), ec,
                                                   llvm::sys::fs::OF_None);
-#else
-  auto f = std::make_unique<llvm::raw_fd_ostream>(path.c_str(), ec,
-                                                  llvm::sys::fs::F_None);
-#endif
-
   if (ec)
     error = ec.message();
   if (!error.empty()) {
@@ -52,4 +50,4 @@ klee_open_compressed_output_file(const std::string &path, std::string &error) {
   return f;
 }
 #endif
-}
+} // namespace klee
