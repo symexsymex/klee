@@ -12,6 +12,7 @@
 
 #include "Context.h"
 #include "TimingSolver.h"
+#include "klee/Module/KType.h"
 
 #include "klee/Expr/Expr.h"
 
@@ -31,7 +32,6 @@ class BitArray;
 class ExecutionState;
 class MemoryManager;
 class Solver;
-
 class MemoryObject {
   friend class STPBuilder;
   friend class ObjectState;
@@ -41,12 +41,15 @@ class MemoryObject {
 
 private:
   static int counter;
+  static int time;
   /// @brief Required by klee::ref-managed objects
   mutable class ReferenceCounter _refCount;
 
 public:
   unsigned id;
+  unsigned timestamp;
   uint64_t address;
+  ref<Expr> lazyInstantiatedSource;
 
   /// size in bytes
   unsigned size;
@@ -55,11 +58,17 @@ public:
   bool isLocal;
   mutable bool isGlobal;
   bool isFixed;
+  bool isKleeMakeSymbolic = false;
 
   bool isUserSpecified;
 
   MemoryManager *parent;
 
+
+  /// Type which can be seen through the "Aliased Type"
+  /// of that MO.
+  KType *dynamicType;
+  
   /// "Location" for which this memory object was allocated. This
   /// should be either the allocating instruction or the global object
   /// it was allocated for (or whatever else makes sense).
@@ -71,22 +80,44 @@ public:
 
 public:
   // XXX this is just a temp hack, should be removed
+
+
   explicit
   MemoryObject(uint64_t _address) 
     : id(counter++),
+      timestamp(time++),
       address(_address),
+      lazyInstantiatedSource(nullptr),
       size(0),
       isFixed(true),
       parent(NULL),
+      dynamicType(nullptr),
+      allocSite(0) {
+  }
+
+  MemoryObject(ref<Expr> _lazyInstantiatedSource)
+    : id(counter++),
+      timestamp(time++),
+      address((uint64_t)0xffffffffffffffff),
+      lazyInstantiatedSource(_lazyInstantiatedSource),
+      size(0),
+      isFixed(true),
+      parent(NULL),
+      dynamicType(nullptr),
       allocSite(0) {
   }
 
   MemoryObject(uint64_t _address, unsigned _size, 
                bool _isLocal, bool _isGlobal, bool _isFixed,
                const llvm::Value *_allocSite,
-               MemoryManager *_parent)
+               MemoryManager *_parent,
+               KType *objectType,
+               ref<Expr> _lazyInstantiatedSource = nullptr,
+               unsigned _timestamp = 0 /* unuse if _lazyInstantiatedSource not null*/)
     : id(counter++),
+      timestamp(_timestamp),
       address(_address),
+      lazyInstantiatedSource(_lazyInstantiatedSource),
       size(_size),
       name("unnamed"),
       isLocal(_isLocal),
@@ -94,7 +125,13 @@ public:
       isFixed(_isFixed),
       isUserSpecified(false),
       parent(_parent), 
+      dynamicType(objectType),
       allocSite(_allocSite) {
+    if (lazyInstantiatedSource) {
+      timestamp = _timestamp;
+    } else {
+      timestamp = time++;
+    }
   }
 
   ~MemoryObject();
@@ -106,8 +143,21 @@ public:
     this->name = name;
   }
 
-  ref<ConstantExpr> getBaseExpr() const { 
+  bool isLazyInstantiated() const { return !lazyInstantiatedSource.isNull(); }
+  ref<Expr> getLazyInstantiatedSource() const {
+    return this->lazyInstantiatedSource;
+  }
+  void setLazyInstantiatedSource(ref<Expr> source) {
+    this->lazyInstantiatedSource = source;
+  }
+  ref<ConstantExpr> getBaseConstantExpr() const {
     return ConstantExpr::create(address, Context::get().getPointerWidth());
+  }
+  ref<Expr> getBaseExpr() const {
+    if (lazyInstantiatedSource.isNull())
+      return getBaseConstantExpr();
+    else
+      return lazyInstantiatedSource;
   }
   ref<ConstantExpr> getSizeExpr() const { 
     return ConstantExpr::create(size, Context::get().getPointerWidth());
@@ -156,6 +206,7 @@ public:
     if (allocSite != b.allocSite)
       return (allocSite < b.allocSite ? -1 : 1);
 
+    assert(lazyInstantiatedSource == b.lazyInstantiatedSource);
     return 0;
   }
 };

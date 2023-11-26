@@ -21,11 +21,15 @@ namespace klee {
   class MemoryObject;
   class ObjectState;
   class TimingSolver;
+  class KType;
 
   template<class T> class ref;
 
   typedef std::pair<const MemoryObject*, const ObjectState*> ObjectPair;
   typedef std::vector<ObjectPair> ResolutionList;  
+
+  // TODO: relocate this
+  extern llvm::cl::opt<bool> StrictAliasingRule;
 
   /// Function object ordering MemoryObject's by address.
   struct MemoryObjectLT {
@@ -70,7 +74,8 @@ namespace klee {
 
     /// Resolve address to an ObjectPair in result.
     /// \return true iff an object was found.
-    bool resolveOne(const ref<ConstantExpr> &address, 
+    bool resolveOne(const ref<ConstantExpr> &address,
+                    KType *objectType, 
                     ObjectPair &result) const;
 
     /// Resolve address to an ObjectPair in result.
@@ -85,6 +90,7 @@ namespace klee {
     bool resolveOne(ExecutionState &state, 
                     TimingSolver *solver,
                     ref<Expr> address,
+                    KType *objectType,
                     ObjectPair &result,
                     bool &success) const;
 
@@ -97,9 +103,25 @@ namespace klee {
     bool resolve(ExecutionState &state,
                  TimingSolver *solver,
                  ref<Expr> p,
+                 KType *objectType,
                  ResolutionList &rl, 
                  unsigned maxResolutions=0,
                  time::Span timeout=time::Span()) const;
+
+    /// Resolve as above, but only to MakeSymbolic and LazyInstantiated
+    /// variables
+    bool fastResolveOne(ExecutionState &state, TimingSolver *solver,
+                        ref<Expr> address, KType *objectType,
+                        ObjectPair &result, bool &success,
+                        unsigned timestamp = -1) const;
+    /// Resolve as above, but only to MakeSymbolic and LazyInstantiated variables
+    bool fastResolve(ExecutionState &state,
+                     TimingSolver *solver,
+                     ref<Expr> p,
+                     KType *objectType,
+                     ResolutionList &rl,
+                     unsigned maxResolutions=0,
+                     time::Span timeout=time::Span(), unsigned timestamp = -1) const;
 
     /***/
 
@@ -146,6 +168,8 @@ namespace klee {
     /// @return
     bool copyInConcrete(const MemoryObject *mo, const ObjectState *os,
                         uint64_t src_address);
+
+    void clear();
   };
 } // End klee namespace
 

@@ -17,20 +17,25 @@
 #include "klee/ADT/TreeStream.h"
 #include "klee/Expr/Constraints.h"
 #include "klee/Expr/Expr.h"
+#include "klee/Expr/ExprHashMap.h"
 #include "klee/Module/KInstIterator.h"
 #include "klee/Solver/Solver.h"
 #include "klee/System/Time.h"
 
+#include "llvm/IR/Function.h"
+
 #include <map>
 #include <memory>
-#include <set>
+#include <unordered_set>
 #include <vector>
 
 namespace klee {
 class Array;
 class CallPathNode;
 struct Cell;
+template<class T> class ExprHashMap;
 struct KFunction;
+struct KBlock;
 struct KInstruction;
 class MemoryObject;
 class PTreeNode;
@@ -143,6 +148,9 @@ struct CleanupPhaseUnwindingInformation : public UnwindingInformation {
   }
 };
 
+
+typedef std::pair<ref<const MemoryObject>, const Array *> Symbolic;
+
 /// @brief ExecutionState representing a path under exploration
 class ExecutionState {
 #ifdef KLEE_UNITTEST
@@ -156,7 +164,12 @@ private:
 public:
   using stack_ty = std::vector<StackFrame>;
 
+  ExprHashMap<std::pair<const MemoryObject *, ref<Expr>>> pointers;
+
   // Execution - Control Flow specific
+
+  /// @brief Pointer to initial instruction
+  KInstIterator initPC;
 
   /// @brief Pointer to instruction to be executed after the current
   /// instruction
@@ -170,12 +183,16 @@ public:
 
   /// @brief Remember from which Basic Block control flow arrived
   /// (i.e. to select the right phi values)
-  std::uint32_t incomingBBIndex;
+  std::int32_t incomingBBIndex;
 
   // Overall state of the state - Data specific
 
   /// @brief Exploration depth, i.e., number of times KLEE branched for this state
   std::uint32_t depth = 0;
+
+  /// @brief Exploration level, i.e., number of times KLEE cycled for this state
+  std::unordered_multiset<llvm::BasicBlock *> multilevel;
+  std::unordered_set<llvm::BasicBlock *> level;
 
   /// @brief Address space used by this state (e.g. Global and Heap)
   AddressSpace addressSpace;
@@ -206,7 +223,7 @@ public:
   /// @brief Ordered list of symbolics: used to generate test cases.
   //
   // FIXME: Move to a shared list structure (not critical).
-  std::vector<std::pair<ref<const MemoryObject>, const Array *>> symbolics;
+  std::vector<Symbolic> symbolics;
 
   /// @brief A set of boolean expressions
   /// the user has requested be true of a counterexample.
@@ -220,6 +237,10 @@ public:
 
   /// @brief The numbers of times this state has run through Executor::stepInstruction
   std::uint64_t steppedInstructions = 0;
+
+  /// @brief The numbers of times this state has run through
+  /// Executor::stepInstruction with executeMemoryOperation
+  std::uint64_t steppedMemoryInstructions = 0;
 
   /// @brief Counts how many instructions were executed since the last new
   /// instruction was covered.
@@ -240,13 +261,17 @@ public:
   /// @brief Disables forking for this state. Set by user code
   bool forkDisabled = false;
 
+  /// @brief The target basic block that the state must achieve
+  KBlock *target = nullptr;
+
 public:
 #ifdef KLEE_UNITTEST
   // provide this function only in the context of unittests
-  ExecutionState() = default;
+  ExecutionState() {}
 #endif
   // only to create the initial state
   explicit ExecutionState(KFunction *kf);
+  explicit ExecutionState(KFunction *kf, KBlock *kb);
   // no copy assignment, use copy constructor
   ExecutionState &operator=(const ExecutionState &) = delete;
   // no move ctor
@@ -257,6 +282,13 @@ public:
   ~ExecutionState();
 
   ExecutionState *branch();
+  ExecutionState *withKFunction(KFunction *kf);
+  ExecutionState *withStackFrame(KFunction *kf);
+  ExecutionState *withKBlock(KBlock *kb);
+  ExecutionState *empty();
+  ExecutionState *copy();
+
+  bool inSymbolics(const MemoryObject* mo);
 
   void pushFrame(KInstIterator caller, KFunction *kf);
   void popFrame();
@@ -271,6 +303,10 @@ public:
 
   std::uint32_t getID() const { return id; };
   void setID() { id = nextID++; };
+  llvm::BasicBlock *getInitPCBlock();
+  llvm::BasicBlock *getPrevPCBlock();
+  llvm::BasicBlock *getPCBlock();
+  void addLevel(llvm::BasicBlock *bb);
 };
 
 struct ExecutionStateIDCompare {

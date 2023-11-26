@@ -14,7 +14,9 @@
 #include "klee/Core/Interpreter.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/IR/CFG.h"
 
+#include <deque>
 #include <map>
 #include <memory>
 #include <set>
@@ -24,9 +26,15 @@ namespace llvm {
   class BasicBlock;
   class Constant;
   class Function;
+  class Value;
   class Instruction;
   class Module;
   class DataLayout;
+  class Type;
+
+  /// Compute the true target of a function call, resolving LLVM aliases
+  /// and bitcasts.
+  llvm::Function* getTargetFunction(llvm::Value *calledVal);
 }
 
 namespace klee {
@@ -37,21 +45,116 @@ namespace klee {
   class InstructionInfoTable;
   struct KInstruction;
   class KModule;
+  struct KFunction;
+  class KType;
   template<class T> class ref;
 
-  struct KFunction {
-    llvm::Function *function;
+  enum KBlockType {
+    Base,
+    Call,
+    Alloc
+  };
 
-    unsigned numArgs, numRegisters;
+  struct KBlock {
+    KFunction *parent;
+    llvm::BasicBlock *basicBlock;
 
     unsigned numInstructions;
     KInstruction **instructions;
 
-    std::map<llvm::BasicBlock*, unsigned> basicBlockEntry;
+    /// Whether instructions in this function should count as
+    /// "coverable" for statistics and search heuristics.
+    bool trackCoverage;
+
+  public:
+    explicit KBlock(KFunction *, llvm::BasicBlock *, KModule *,
+                    std::map<llvm::Instruction *, unsigned> &,
+                    std::map<unsigned, KInstruction *> &, KInstruction **);
+    KBlock(const KBlock &) = delete;
+    KBlock &operator=(const KBlock &) = delete;
+
+    unsigned getArgRegister(unsigned index) const { return index; }
+    void
+    handleKInstruction(std::map<llvm::Instruction *, unsigned> &registerMap,
+                       llvm::Instruction *inst, KModule *km, KInstruction *ki);
+    virtual KBlockType getKBlockType() const { return KBlockType::Base; };
+    virtual ~KBlock() = default;
+  };
+
+  struct KCallBlock : KBlock {
+    KInstruction *kcallInstruction;
+    llvm::Function *calledFunction;
+
+  public:
+    explicit KCallBlock(KFunction *, llvm::BasicBlock *, KModule *,
+                        std::map<llvm::Instruction *, unsigned> &,
+                        std::map<unsigned, KInstruction *> &, llvm::Function *,
+                        KInstruction **);
+
+    /// Factory method for KCallBlocks
+    static KCallBlock *
+    computeKCallBlock(KFunction *, llvm::BasicBlock *, KModule *,
+                      std::map<llvm::Instruction *, unsigned> &,
+                      std::map<unsigned, KInstruction *> &, llvm::Function *,
+                      KInstruction **, std::map<llvm::Value *, llvm::Type *> &);
+
+    KBlockType getKBlockType() const override { return KBlockType::Call; };
+    static bool classof(const KBlock *kblock) {
+      return kblock->getKBlockType() == KBlockType::Call;
+    }
+  };
+
+  struct KCallAllocBlock : KCallBlock {
+    llvm::Type *allocationType;
+
+    static const llvm::StringRef allocNewU;
+    static const llvm::StringRef allocNewUArray;
+    static const llvm::StringRef allocNewL;
+    static const llvm::StringRef allocNewLArray;
+    static const llvm::StringRef allocMalloc;
+    static const llvm::StringRef allocCalloc;
+    static const llvm::StringRef allocMemalign;
+    static const llvm::StringRef allocRealloc;
+
+
+  public:
+    explicit KCallAllocBlock(KFunction*, llvm::BasicBlock*, KModule*,
+                    std::map<llvm::Instruction*, unsigned>&, std::map<unsigned, KInstruction*>&,
+                    llvm::Function*, KInstruction **, llvm::Type *);
+    KBlockType getKBlockType() const override { return KBlockType::Alloc; };
+    static bool classof(const KBlock *kblock) {
+      return kblock->getKBlockType() == KBlockType::Alloc;
+    }
+  };
+
+  struct KFunction {
+    KModule *parent;
+    llvm::Function *function;
+
+    unsigned numArgs, numRegisters;
+
+    std::map<unsigned, KInstruction *> regToInst;
+    unsigned numInstructions;
+    unsigned numBlocks;
+    KInstruction **instructions;
+
+    std::map<llvm::Instruction *, KInstruction *> instructionMap;
+    std::vector<std::unique_ptr<KBlock>> blocks;
+    std::map<llvm::BasicBlock *, KBlock *> blockMap;
+    KBlock *entryKBlock;
+    std::vector<KBlock *> finalKBlocks;
+    std::vector<KCallBlock *> kCallBlocks;
 
     /// Whether instructions in this function should count as
     /// "coverable" for statistics and search heuristics.
     bool trackCoverage;
+
+  private:
+    std::map<KBlock *, std::map<KBlock *, unsigned int>> distance;
+    std::map<KBlock *, std::map<KBlock *, unsigned int>> backwardDistance;
+    // BFS algorithm
+    void calculateDistance(KBlock *bb);
+    void calculateBackwardDistance(KBlock *bb);
 
   public:
     explicit KFunction(llvm::Function*, KModule *);
@@ -60,7 +163,9 @@ namespace klee {
 
     ~KFunction();
 
-    unsigned getArgRegister(unsigned index) { return index; }
+    unsigned getArgRegister(unsigned index) const { return index; }
+    std::map<KBlock *, unsigned int> &getDistance(KBlock *kb);
+    std::map<KBlock *, unsigned int> &getBackwardDistance(KBlock *kb);
   };
 
 
@@ -88,6 +193,7 @@ namespace klee {
     // Our shadow versions of LLVM structures.
     std::vector<std::unique_ptr<KFunction>> functions;
     std::map<llvm::Function*, KFunction*> functionMap;
+    std::map<llvm::Function *, std::set<llvm::Function *>> callMap;
 
     // Functions which escape (may be called indirectly)
     // XXX change to KFunction
@@ -105,8 +211,15 @@ namespace klee {
     std::set<const llvm::Function*> internalFunctions;
 
   private:
+    std::map<KFunction *, std::map<KFunction *, unsigned int>> distance;
+    std::map<KFunction *, std::map<KFunction *, unsigned int>> backwardDistance;
+
     // Mark function with functionName as part of the KLEE runtime
     void addInternalFunction(const char* functionName);
+
+    // BFS algorithm
+    void calculateDistance(KFunction *kf);
+    void calculateBackwardDistance(KFunction *kf);
 
   public:
     KModule() = default;
@@ -147,6 +260,10 @@ namespace klee {
     /// Run passes that check if module is valid LLVM IR and if invariants
     /// expected by KLEE's Executor hold.
     void checkModule();
+
+    KBlock *getKBlock(llvm::BasicBlock *bb);
+    std::map<KFunction *, unsigned int> &getBackwardDistance(KFunction *kf);
+    std::map<KFunction *, unsigned int> &getDistance(KFunction *kf);
   };
 } // End klee namespace
 

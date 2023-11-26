@@ -26,6 +26,8 @@ klee_add_component(kleeCore
   StatsTracker.cpp
   TimingSolver.cpp
   UserSearcher.cpp
+  TypeManager.cpp
+  CXXTypeSystem/CXXTypeManager.cpp
 )
 
 # TODO: Work out what the correct LLVM components are for
@@ -41,6 +43,7 @@ set(LLVM_COMPONENTS
 klee_get_llvm_libs(LLVM_LIBS ${LLVM_COMPONENTS})
 target_link_libraries(kleeCore PUBLIC ${LLVM_LIBS} ${SQLITE3_LIBRARIES})
 target_link_libraries(kleeCore PRIVATE
+  kleeADT
   kleeBasic
   kleeModule
   kleaverSolver

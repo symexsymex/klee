@@ -14,9 +14,12 @@
 
 #include "klee/Expr/Expr.h"
 #include "klee/Support/ErrorHandling.h"
+#include "klee/Module/KType.h"
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MathExtras.h"
+
+#include "llvm/IR/Instructions.h"
 
 #include <inttypes.h>
 #include <sys/mman.h>
@@ -99,12 +102,14 @@ MemoryManager::~MemoryManager() {
 MemoryObject *MemoryManager::allocate(uint64_t size, bool isLocal,
                                       bool isGlobal,
                                       const llvm::Value *allocSite,
-                                      size_t alignment) {
+                                      KType *allocatedType,
+                                      size_t alignment,
+                                      ref<Expr> lazyInstantiatedSource,
+                                      unsigned timestamp) {
   if (size > 10 * 1024 * 1024)
     klee_warning_once(0, "Large alloc: %" PRIu64
                          " bytes.  KLEE may run out of memory.",
                       size);
-
   // Return NULL if size is zero, this is equal to error during allocation
   if (NullOnZeroMalloc && size == 0)
     return 0;
@@ -146,14 +151,17 @@ MemoryObject *MemoryManager::allocate(uint64_t size, bool isLocal,
     return 0;
 
   ++stats::allocations;
-  MemoryObject *res = new MemoryObject(address, size, isLocal, isGlobal, false,
-                                       allocSite, this);
+  assert(allocatedType && "Given null instead of KType object");
+  MemoryObject *res =
+      new MemoryObject(address, size, isLocal, isGlobal, false, allocSite, this,
+                       allocatedType, lazyInstantiatedSource, timestamp);
   objects.insert(res);
   return res;
 }
 
 MemoryObject *MemoryManager::allocateFixed(uint64_t address, uint64_t size,
-                                           const llvm::Value *allocSite) {
+                                           const llvm::Value *allocSite,
+                                           KType *allocatedType) {
 #ifndef NDEBUG
   for (objects_ty::iterator it = objects.begin(), ie = objects.end(); it != ie;
        ++it) {
@@ -164,8 +172,11 @@ MemoryObject *MemoryManager::allocateFixed(uint64_t address, uint64_t size,
 #endif
 
   ++stats::allocations;
+
+    assert(allocatedType && "Given null instead of KType object");
   MemoryObject *res =
-      new MemoryObject(address, size, false, true, true, allocSite, this);
+      new MemoryObject(address, size, false, true, true, allocSite, this, allocatedType);
+
   objects.insert(res);
   return res;
 }
